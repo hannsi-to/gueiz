@@ -1,0 +1,6 @@
+[package]
+name = "gueiz-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -6,6 +6,12 @@
       <sourceFolder url="file://$MODULE_DIR$/gueiz/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tester/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-sound/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-vulkan/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-window/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gueiz/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

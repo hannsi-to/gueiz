@@ -1,0 +1,6 @@
+[package]
+name = "gueiz-sound"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

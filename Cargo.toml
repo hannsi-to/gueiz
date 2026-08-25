@@ -1,1 +1,16 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
 
+[workspace.package]
+version = "0.0.1-beta"
+edition = "2024"
+
+[workspace.dependencies]
+env_logger = "0.11.11"
+gueiz-core = { path = "crates/gueiz-core" }
+gueiz-sound = { path = "crates/gueiz-sound" }
+gueiz-vulkan = { path = "crates/gueiz-vulkan" }
+gueiz-window = { path = "crates/gueiz-window" }
+log = "0.4.32"
+winit = "0.31.0-beta.2"
