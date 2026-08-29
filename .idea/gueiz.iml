@@ -11,6 +11,7 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-sound/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-vulkan/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-window/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gueiz/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/gueiz/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
