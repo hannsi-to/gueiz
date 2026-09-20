@@ -50,6 +50,41 @@ pub trait ApplicationHandler {
     fn window_closed(&mut self, application: &Application, window_id: WindowId) {
         let _ = (application, window_id);
     }
+
+    /// 窓の上で指し手が動いた。何もしないのが既定。
+    ///
+    /// 位置は**窓の左上から数えた画素**。画面の左上からではない。
+    fn cursor_moved(
+        &mut self,
+        application: &Application,
+        window_id: WindowId,
+        cursor_position: CursorPosition,
+    ) {
+        let _ = (application, window_id, cursor_position);
+    }
+
+    /// 指し手が窓から出た。何もしないのが既定。
+    ///
+    /// 押したまま窓の外へ出たときは呼ばれない。掴んでいる間は窓が
+    /// 指し手を握り続けるので、[`ApplicationHandler::cursor_moved`] が
+    /// 窓の外の位置で届く。
+    fn cursor_left(&mut self, application: &Application, window_id: WindowId) {
+        let _ = (application, window_id);
+    }
+
+    /// 窓の上で釦が押された、または離された。何もしないのが既定。
+    ///
+    /// 触りや筆で触れたときも、当たる釦に読み替えて届く。
+    fn mouse_input(
+        &mut self,
+        application: &Application,
+        window_id: WindowId,
+        button_state: ButtonState,
+        mouse_button: MouseButton,
+        cursor_position: CursorPosition,
+    ) {
+        let _ = (application, window_id, button_state, mouse_button, cursor_position);
+    }
 }
 
 pub struct ApplicationRunner {
@@ -137,6 +172,27 @@ impl<A: ApplicationHandler> winit::application::ApplicationHandler for WinitAppl
 
             WindowEvent::RedrawRequested => {
                 application_handler.redraw_requested(&application, window_id);
+            }
+
+            WindowEvent::PointerMoved { position, .. } => {
+                application_handler.cursor_moved(&application, window_id, position.into());
+            }
+
+            WindowEvent::PointerLeft { .. } => {
+                application_handler.cursor_left(&application, window_id);
+            }
+
+            WindowEvent::PointerButton { state, position, button, .. } => {
+                // 触りや筆は当たる釦に読み替える。読み替えられないものは捨てる。
+                if let Some(mouse_button) = button.mouse_button() {
+                    application_handler.mouse_input(
+                        &application,
+                        window_id,
+                        state.into(),
+                        mouse_button.into(),
+                        position.into(),
+                    );
+                }
             }
 
             _ => {}
@@ -873,6 +929,77 @@ impl From<ResizeDirection> for winit::window::ResizeDirection {
             ResizeDirection::SouthEast => Self::SouthEast,
             ResizeDirection::SouthWest => Self::SouthWest,
             ResizeDirection::West => Self::West,
+        }
+    }
+}
+
+/// 指し手の位置。**窓の左上から数えた画素。**
+///
+/// 画素の間を指せるので整数ではない。窓を掴んで動かすときは、掴んだ場所と
+/// 今の場所の差だけ窓を動かせばよい。
+#[derive(Clone, Copy)]
+#[derive(PartialEq)]
+#[derive(Debug, Default)]
+pub struct CursorPosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl CursorPosition {
+    pub fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+}
+
+impl From<PhysicalPosition<f64>> for CursorPosition {
+    fn from(value: PhysicalPosition<f64>) -> Self {
+        Self::new(value.x, value.y)
+    }
+}
+
+/// 釦が押されたか、離されたか。
+#[derive(Clone, Copy)]
+#[derive(Eq, PartialEq)]
+#[derive(Debug)]
+pub enum ButtonState {
+    Pressed,
+    Released,
+}
+
+impl From<winit::event::ElementState> for ButtonState {
+    fn from(value: winit::event::ElementState) -> Self {
+        match value {
+            winit::event::ElementState::Pressed => Self::Pressed,
+            winit::event::ElementState::Released => Self::Released,
+        }
+    }
+}
+
+/// 鼠の釦。
+#[derive(Clone, Copy)]
+#[derive(Eq, PartialEq)]
+#[derive(Debug)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    /// 横の釦。戻るに割り当てられていることが多い。
+    Back,
+    /// 横の釦。進むに割り当てられていることが多い。
+    Forward,
+    /// 6 個目から先。数は winit の並びのまま。
+    Other(u8),
+}
+
+impl From<winit::event::MouseButton> for MouseButton {
+    fn from(value: winit::event::MouseButton) -> Self {
+        match value {
+            winit::event::MouseButton::Left => Self::Left,
+            winit::event::MouseButton::Right => Self::Right,
+            winit::event::MouseButton::Middle => Self::Middle,
+            winit::event::MouseButton::Back => Self::Back,
+            winit::event::MouseButton::Forward => Self::Forward,
+            other => Self::Other(other as u8),
         }
     }
 }
