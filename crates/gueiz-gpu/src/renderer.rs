@@ -113,6 +113,49 @@ impl SurfaceSize {
     }
 }
 
+
+/// 透ける窓に描くときの、色の重ね方。
+///
+/// **[`Renderer::create_surface`] より前に決めること。** 後から変えても、
+/// すでに作ったサーフェスには効きません。
+///
+/// 既定は [`SurfaceAlphaMode::Auto`]、つまりサーフェスに任せる。多くの環境で
+/// これは不透明になり、**シェーダが書いたアルファは捨てられます。** 窓を
+/// 透かしたいなら [`SurfaceAlphaMode::PreMultiplied`] を選ぶ。
+///
+/// 選んだ重ね方をサーフェスが持っていないときは、警告を出して既定に戻ります。
+/// 何が使えるかは起動時のログ（`alpha : supported ...`）に出ます。Windows の
+/// DirectX12 は `PreMultiplied` を出さないことがあるので、そのときは
+/// [`RendererBackend::Vulkan`] を指定すると通ることが多い。
+#[derive(Clone, Copy)]
+#[derive(Eq, PartialEq)]
+#[derive(Debug, Default)]
+pub enum SurfaceAlphaMode {
+    /// サーフェスに任せる。たいてい不透明になる。
+    #[default]
+    Auto,
+    /// アルファを捨てて不透明にする。
+    Opaque,
+    /// 色にあらかじめアルファを掛けた状態で重ねる。透ける窓ならこれ。
+    PreMultiplied,
+    /// 色とアルファを別々に持ったまま重ねる。
+    PostMultiplied,
+    /// 窓の側の設定に従う。
+    Inherit,
+}
+
+impl SurfaceAlphaMode {
+    /// wgpu の指定へ。`Auto` は「触らない」なので `None` を返す。
+    fn to_composite_alpha_mode(self) -> Option<wgpu::CompositeAlphaMode> {
+        match self {
+            Self::Auto => None,
+            Self::Opaque => Some(wgpu::CompositeAlphaMode::Opaque),
+            Self::PreMultiplied => Some(wgpu::CompositeAlphaMode::PreMultiplied),
+            Self::PostMultiplied => Some(wgpu::CompositeAlphaMode::PostMultiplied),
+            Self::Inherit => Some(wgpu::CompositeAlphaMode::Inherit),
+        }
+    }
+}
 pub struct Renderer {
     instance: wgpu::Instance,
     renderer_backend: RendererBackend,
@@ -120,6 +163,8 @@ pub struct Renderer {
     post_chain: PostChain,
     /// 縁のギザギザを均す点の数。サーフェスを作る前に決めること。
     sample_count: u32,
+    /// 透ける窓に描くときの色の重ね方。サーフェスを作る前に決めること。
+    surface_alpha_mode: SurfaceAlphaMode,
 }
 
 impl Renderer {
@@ -142,6 +187,7 @@ impl Renderer {
             render_surface: None,
             post_chain: PostChain::new(),
             sample_count: NO_MULTISAMPLE,
+            surface_alpha_mode: SurfaceAlphaMode::default(),
         }
     }
 
@@ -190,9 +236,26 @@ impl Renderer {
         }))
         .map_err(DeviceCreationError)?;
 
-        let surface_configuration = surface
+        let surface_capabilities = surface.get_capabilities(&adapter);
+
+        let mut surface_configuration = surface
             .get_default_config(&adapter, surface_size.width, surface_size.height)
             .ok_or(UnsupportedSurfaceError)?;
+
+        // 透ける窓に描くなら、ここで重ね方を選んでおく必要がある。既定の設定は
+        // たいてい不透明で、シェーダが書いたアルファは捨てられてしまう。
+        if let Some(composite_alpha_mode) = self.surface_alpha_mode.to_composite_alpha_mode() {
+            if surface_capabilities.alpha_modes.contains(&composite_alpha_mode) {
+                surface_configuration.alpha_mode = composite_alpha_mode;
+            } else {
+                log::warn!(
+                    "{:?} is not supported by this surface; falling back to {:?}",
+                    composite_alpha_mode,
+                    surface_configuration.alpha_mode,
+                );
+            }
+        }
+
         surface.configure(&device, &surface_configuration);
 
         log::info!(
@@ -201,6 +264,11 @@ impl Renderer {
             surface_configuration.present_mode,
             surface_configuration.width,
             surface_configuration.height,
+        );
+        log::info!(
+            "alpha   : {:?} (supported: {:?})",
+            surface_configuration.alpha_mode,
+            surface_capabilities.alpha_modes,
         );
 
         // 画面全体のパスを走らせる側。サーフェスの形式に合わせて組む。
@@ -306,6 +374,22 @@ impl Renderer {
 
     pub fn sample_count(&self) -> u32 {
         self.sample_count
+    }
+
+    /// 透ける窓に描くときの色の重ね方。
+    ///
+    /// **[`Renderer::create_surface`] より前に決めること。** 後から変えても、
+    /// すでに作ったサーフェスには効きません。
+    ///
+    /// 窓を透かすには三つ揃える必要がある。窓を `transparent` で作ること、
+    /// ここを [`SurfaceAlphaMode::PreMultiplied`] にすること、そして
+    /// [`Renderer::render`] に渡す消す色のアルファを 0 にすること。
+    pub fn set_surface_alpha_mode(&mut self, surface_alpha_mode: SurfaceAlphaMode) {
+        self.surface_alpha_mode = surface_alpha_mode;
+    }
+
+    pub fn surface_alpha_mode(&self) -> SurfaceAlphaMode {
+        self.surface_alpha_mode
     }
 
     /// 画面全体に掛けるエフェクトの列。

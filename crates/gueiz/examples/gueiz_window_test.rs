@@ -13,6 +13,7 @@ impl ApplicationHandler for TestApplication {
                 title: format!("gueiz window #{index}"),
                 width: 640,
                 height: 480,
+                ..Default::default()
             };
 
             match application.create_window(window_descriptor) {

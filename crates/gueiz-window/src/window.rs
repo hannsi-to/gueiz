@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 use std::time::Instant;
 
 use fxhash::FxHashMap;
@@ -25,7 +26,30 @@ use crate::error::GueizWindowError::{
 };
 
 pub trait ApplicationHandler {
+    /// 描き先を作れるようになった。ここで窓を開く。
     fn can_create_surfaces(&mut self, application: &Application);
+
+    /// 窓を描き直す番が来た。何もしないのが既定。
+    fn redraw_requested(&mut self, application: &Application, window_id: WindowId) {
+        let _ = (application, window_id);
+    }
+
+    /// 窓の大きさが変わった。描き先も張り直すこと。何もしないのが既定。
+    fn surface_resized(
+        &mut self,
+        application: &Application,
+        window_id: WindowId,
+        surface_size: WindowSize,
+    ) {
+        let _ = (application, window_id, surface_size);
+    }
+
+    /// 窓が閉じられた。呼ばれた時点で、その窓はもう一覧にいない。
+    ///
+    /// 何もしないのが既定。最後の 1 枚が閉じれば、このあと自動で終わる。
+    fn window_closed(&mut self, application: &Application, window_id: WindowId) {
+        let _ = (application, window_id);
+    }
 }
 
 pub struct ApplicationRunner {
@@ -86,13 +110,36 @@ impl<A: ApplicationHandler> winit::application::ApplicationHandler for WinitAppl
         window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        if let WindowEvent::CloseRequested = event {
-            let mut window_manager = self.application_state.window_manager.borrow_mut();
-            window_manager.remove_window(WindowId(window_id));
+        let Self { application_handler, application_state } = self;
 
-            if window_manager.is_empty() {
-                event_loop.exit();
+        let window_id = WindowId(window_id);
+        let application = Application { active_event_loop: event_loop, application_state };
+
+        match event {
+            WindowEvent::CloseRequested => {
+                // 呼ぶ側に知らせる前に一覧から外す。知らせている最中に
+                // `with_window` を呼ばれても、閉じた窓は見えない。
+                application_state
+                    .window_manager
+                    .borrow_mut()
+                    .remove_window(window_id);
+
+                application_handler.window_closed(&application, window_id);
+
+                if application_state.window_manager.borrow().is_empty() {
+                    event_loop.exit();
+                }
             }
+
+            WindowEvent::SurfaceResized(surface_size) => {
+                application_handler.surface_resized(&application, window_id, surface_size.into());
+            }
+
+            WindowEvent::RedrawRequested => {
+                application_handler.redraw_requested(&application, window_id);
+            }
+
+            _ => {}
         }
     }
 }
@@ -180,10 +227,63 @@ impl From<&ApplicationLoopType> for winit::event_loop::ControlFlow {
     }
 }
 
+/// 窓の作り方。[`Application::create_window`] に渡す。
+///
+/// 既定は「普通のアプリの窓」。ウィジェットのように飾りの無い窓を出すなら、
+/// `decorations` を `false`、`transparent` を `true` にする。
+///
+/// # 生成時にしか効かないもの
+///
+/// `transparent` と `skip_taskbar` は **窓を作るときにしか決められません。**
+/// Windows の透明化は `DwmEnableBlurBehindWindow` で行いますが、winit が
+/// これを呼ぶのは窓を作る瞬間だけです。あとから [`Window::set_transparent`]
+/// を呼んでも見た目は変わりません。
+///
+/// # 例
+///
+/// ```no_run
+/// use gueiz_window::window::{WindowDescriptor, WindowLevel};
+///
+/// let widget = WindowDescriptor {
+///     title: String::from("clock"),
+///     width: 240,
+///     height: 120,
+///     transparent: true,
+///     decorations: false,
+///     skip_taskbar: true,
+///     window_level: WindowLevel::AlwaysOnBottom,
+///     active: false,
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Clone)]
+#[derive(Debug)]
 pub struct WindowDescriptor {
     pub title: String,
     pub width: u32,
     pub height: u32,
+    /// 置く場所。`None` なら OS に任せる。
+    pub position: Option<WindowPosition>,
+    /// 背景を透かす。**生成時にしか効かない。**
+    ///
+    /// 描く側でも揃える必要がある。GPU 側で合成方法を
+    /// `SurfaceAlphaMode::PreMultiplied` にし、消す色のアルファを 0 にすること。
+    /// どれか一つでも欠けると透けない。
+    pub transparent: bool,
+    /// 枠と題名の帯を出す。
+    pub decorations: bool,
+    /// 窓の前後。ウィジェットなら [`WindowLevel::AlwaysOnBottom`]。
+    pub window_level: WindowLevel,
+    /// 作った直後から見せる。
+    pub visible: bool,
+    /// 縁を掴んで大きさを変えられる。
+    pub resizable: bool,
+    /// 作った直後に前へ出して入力を奪う。ウィジェットなら `false`。
+    pub active: bool,
+    /// タスクバーと Alt+Tab から隠す。**生成時にしか効かない。**
+    ///
+    /// Windows だけの指定。ほかの OS では黙って無視される。
+    pub skip_taskbar: bool,
 }
 
 impl Default for WindowDescriptor {
@@ -192,15 +292,46 @@ impl Default for WindowDescriptor {
             title: String::from("gueiz"),
             width: 1280,
             height: 720,
+            position: None,
+            transparent: false,
+            decorations: true,
+            window_level: WindowLevel::Normal,
+            visible: true,
+            resizable: true,
+            active: true,
+            skip_taskbar: false,
         }
     }
 }
 
 impl From<WindowDescriptor> for winit::window::WindowAttributes {
     fn from(value: WindowDescriptor) -> Self {
-        Self::default()
+        let mut window_attributes = Self::default()
             .with_title(value.title)
             .with_surface_size(LogicalSize::new(value.width, value.height))
+            .with_transparent(value.transparent)
+            .with_decorations(value.decorations)
+            .with_window_level(value.window_level.into())
+            .with_visible(value.visible)
+            .with_resizable(value.resizable)
+            .with_active(value.active);
+
+        if let Some(position) = value.position {
+            window_attributes = window_attributes.with_position(PhysicalPosition::from(position));
+        }
+
+        // タスクバーから隠すのは Windows 固有の作法。winit では窓を作るときの
+        // プラットフォーム別の指定として渡す。
+        #[cfg(target_os = "windows")]
+        {
+            use winit::platform::windows::WindowAttributesWindows;
+
+            window_attributes = window_attributes.with_platform_attributes(Box::new(
+                WindowAttributesWindows::default().with_skip_taskbar(value.skip_taskbar),
+            ));
+        }
+
+        window_attributes
     }
 }
 
@@ -274,13 +405,22 @@ impl Display for WindowId {
 }
 
 pub struct Window {
-    window: Box<dyn winit::window::Window>,
+    window: Arc<dyn winit::window::Window>,
 }
 
 impl Window {
     fn new(window: Box<dyn winit::window::Window>) -> Self {
         Self {
-            window,
+            window: Arc::from(window),
+        }
+    }
+
+    /// 窓より長生きできる持ち手を取る。GPU の描き先を作るのに使う。
+    ///
+    /// 詳しくは [`WindowSurfaceHandle`]。
+    pub fn surface_handle(&self) -> WindowSurfaceHandle {
+        WindowSurfaceHandle {
+            window: Arc::clone(&self.window),
         }
     }
 
@@ -523,6 +663,32 @@ impl HasDisplayHandle for Window {
 }
 
 impl HasWindowHandle for Window {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        self.window.rwh_06_window_handle().window_handle()
+    }
+}
+
+/// 窓の持ち手。[`Window::surface_handle`] で取る。
+///
+/// GPU の描き先（`wgpu` のサーフェスなど）は `'static` な持ち手を欲しがりますが、
+/// 窓を持っているのは [`Application`] で、呼ぶ側は借りることしかできません。
+/// これはその橋渡しです。生のハンドルを返すだけなので、`wgpu` の
+/// `create_surface` にそのまま渡せます。
+///
+/// 窓を閉じても、この持ち手が残っているかぎり窓は解放されません。
+/// **描き先を捨てるときに、これも一緒に捨てること。**
+#[derive(Clone)]
+pub struct WindowSurfaceHandle {
+    window: Arc<dyn winit::window::Window>,
+}
+
+impl HasDisplayHandle for WindowSurfaceHandle {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        self.window.rwh_06_display_handle().display_handle()
+    }
+}
+
+impl HasWindowHandle for WindowSurfaceHandle {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
         self.window.rwh_06_window_handle().window_handle()
     }

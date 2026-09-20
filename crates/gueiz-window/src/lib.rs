@@ -26,6 +26,7 @@
 //!             title: String::from("gueiz"),
 //!             width: 1280,
 //!             height: 720,
+//!             ..Default::default()
 //!         });
 //!     }
 //! }
