@@ -1,0 +1,10 @@
+[package]
+name = "gueiz-3d"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+gueiz-gpu.workspace = true
+log.workspace = true
+wgpu.workspace = true

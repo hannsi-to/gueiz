@@ -7,14 +7,17 @@ version = "0.0.1-beta"
 edition = "2024"
 
 [workspace.dependencies]
-ash = "0.38.0"
-ash-window = "0.13.0"
+bytemuck = "1.25.2"
 env_logger = "0.11.11"
 fxhash = "0.2.1"
+gueiz-2d = { path = "crates/gueiz-2d" }
+gueiz-3d = { path = "crates/gueiz-3d" }
 gueiz-core = { path = "crates/gueiz-core" }
+gueiz-gpu = { path = "crates/gueiz-gpu" }
 gueiz-sound = { path = "crates/gueiz-sound" }
-gueiz-vulkan = { path = "crates/gueiz-vulkan" }
 gueiz-window = { path = "crates/gueiz-window" }
 log = "0.4.32"
+pollster = "1.0.1"
 raw-window-handle = "0.6.2"
+wgpu = "30.0.1"
 winit = "0.31.0-beta.2"

@@ -1,0 +1,11 @@
+[package]
+name = "gueiz-gpu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bitflags = "2.13.1"
+bytemuck.workspace = true
+log.workspace = true
+pollster.workspace = true
+wgpu.workspace = true

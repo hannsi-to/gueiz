@@ -1,6 +1,0 @@
-[package]
-name = "gueiz-vulkan"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
