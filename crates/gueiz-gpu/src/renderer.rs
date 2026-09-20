@@ -156,6 +156,47 @@ impl SurfaceAlphaMode {
         }
     }
 }
+
+/// 描いた絵をいつ画面に出すか。
+///
+/// **[`Renderer::create_surface`] より前に決めること。**
+///
+/// 既定は [`SurfacePresentMode::Auto`]、つまりサーフェスに任せる。多くの環境で
+/// これは `Fifo` になりますが、**Windows の DirectX12 では `Mailbox` が選ばれる
+/// ことがあります。** `Mailbox` は待たないので、毎フレーム描き続ける作りだと
+/// CPU を焼き続けます。垂直同期で回したいなら [`SurfacePresentMode::Fifo`] を
+/// 明示すること。
+///
+/// 選んだやり方をサーフェスが持っていなければ、警告を出して既定に戻ります。
+#[derive(Clone, Copy)]
+#[derive(Eq, PartialEq)]
+#[derive(Debug, Default)]
+pub enum SurfacePresentMode {
+    /// サーフェスに任せる。
+    #[default]
+    Auto,
+    /// 垂直同期を待つ。1 枚ずつ並べて出す。どの環境にも必ずある。
+    Fifo,
+    /// 垂直同期を待つが、間に合わなければ待たずに出す。
+    FifoRelaxed,
+    /// 待たない。並んでいる古い絵は捨てて、新しい絵に差し替える。
+    Mailbox,
+    /// 待たない。描けた端から出す。裂けて見えることがある。
+    Immediate,
+}
+
+impl SurfacePresentMode {
+    /// wgpu の指定へ。`Auto` は「触らない」なので `None` を返す。
+    fn to_present_mode(self) -> Option<wgpu::PresentMode> {
+        match self {
+            Self::Auto => None,
+            Self::Fifo => Some(wgpu::PresentMode::Fifo),
+            Self::FifoRelaxed => Some(wgpu::PresentMode::FifoRelaxed),
+            Self::Mailbox => Some(wgpu::PresentMode::Mailbox),
+            Self::Immediate => Some(wgpu::PresentMode::Immediate),
+        }
+    }
+}
 pub struct Renderer {
     instance: wgpu::Instance,
     renderer_backend: RendererBackend,
@@ -165,6 +206,8 @@ pub struct Renderer {
     sample_count: u32,
     /// 透ける窓に描くときの色の重ね方。サーフェスを作る前に決めること。
     surface_alpha_mode: SurfaceAlphaMode,
+    /// 描いた絵をいつ出すか。サーフェスを作る前に決めること。
+    surface_present_mode: SurfacePresentMode,
 }
 
 impl Renderer {
@@ -188,6 +231,7 @@ impl Renderer {
             post_chain: PostChain::new(),
             sample_count: NO_MULTISAMPLE,
             surface_alpha_mode: SurfaceAlphaMode::default(),
+            surface_present_mode: SurfacePresentMode::default(),
         }
     }
 
@@ -252,6 +296,18 @@ impl Renderer {
                     "{:?} is not supported by this surface; falling back to {:?}",
                     composite_alpha_mode,
                     surface_configuration.alpha_mode,
+                );
+            }
+        }
+
+        if let Some(present_mode) = self.surface_present_mode.to_present_mode() {
+            if surface_capabilities.present_modes.contains(&present_mode) {
+                surface_configuration.present_mode = present_mode;
+            } else {
+                log::warn!(
+                    "{:?} is not supported by this surface; falling back to {:?}",
+                    present_mode,
+                    surface_configuration.present_mode,
                 );
             }
         }
@@ -390,6 +446,21 @@ impl Renderer {
 
     pub fn surface_alpha_mode(&self) -> SurfaceAlphaMode {
         self.surface_alpha_mode
+    }
+
+    /// 描いた絵をいつ画面に出すか。
+    ///
+    /// **[`Renderer::create_surface`] より前に決めること。** 後から変えても、
+    /// すでに作ったサーフェスには効きません。
+    ///
+    /// 毎フレーム描き続けるなら [`SurfacePresentMode::Fifo`] を選ぶこと。
+    /// 既定のままだと環境によっては待たない設定が選ばれ、空回りします。
+    pub fn set_surface_present_mode(&mut self, surface_present_mode: SurfacePresentMode) {
+        self.surface_present_mode = surface_present_mode;
+    }
+
+    pub fn surface_present_mode(&self) -> SurfacePresentMode {
+        self.surface_present_mode
     }
 
     /// 画面全体に掛けるエフェクトの列。
