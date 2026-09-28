@@ -270,25 +270,10 @@ impl Camera {
         let clip_x = x / width * 2.0 - 1.0;
         let clip_y = 1.0 - y / height * 2.0;
 
-        let columns = self.view_projection().to_columns();
+        let back = self.view_projection().inverse_2d()?;
+        let [x, y, _] = back.transform_point(clip_x, clip_y, 0.0);
 
-        // 2D では x と y にしか効かないので、左上の 2x2 だけ戻せばよい。
-        let (a, b) = (columns[0][0], columns[0][1]);
-        let (c, d) = (columns[1][0], columns[1][1]);
-        let (tx, ty) = (columns[3][0], columns[3][1]);
-
-        let determinant = a * d - b * c;
-
-        if determinant.abs() < f32::EPSILON {
-            return None;
-        }
-
-        let (dx, dy) = (clip_x - tx, clip_y - ty);
-
-        Some([
-            (d * dx - c * dy) / determinant,
-            (a * dy - b * dx) / determinant,
-        ])
+        Some([x, y])
     }
 
     /// 図形の座標を、画面の画素位置へ写す。[`Camera::screen_to_world`] の逆。

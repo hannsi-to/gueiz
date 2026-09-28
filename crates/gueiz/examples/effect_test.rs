@@ -20,8 +20,8 @@ use common::preview::Preview;
 
 use gueiz_2d::camera::Camera;
 use gueiz_2d::effect::{Block, CustomBlock, EffectStack, EffectStage, CUSTOM_KIND_BASE};
-use gueiz_2d::object::draw_manager::{DrawManager, DrawManagerDescriptor};
-use gueiz_2d::object::{self, instance};
+use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::{self, instance, object};
 use gueiz_2d::paint_type::PaintType;
 use gueiz_2d::texture::TextureFormat;
 use gueiz_2d::vertex::Vertex;

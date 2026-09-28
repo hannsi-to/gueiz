@@ -6,7 +6,7 @@
 use std::f32::consts::PI;
 use std::ops::Range;
 
-use crate::paint_type::{JointType, PaintType};
+use crate::paint_type::{Dash, JointType, PaintType};
 use crate::vertex::Vertex;
 
 /// 尖らせすぎを防ぐ上限。線幅に対する飛び出し量の比。
@@ -36,10 +36,29 @@ pub fn tessellate(
             line_width,
             joint_type,
             strip,
+            dash,
         } => {
             // 線は輪郭ごとに独立して引く。穴の縁にも同じ太さの線が付く。
             for range in contour_ranges(outline, contour_starts, 2) {
-                stroke(&outline[range], line_width, joint_type, strip, triangles);
+                let Some(dash) = dash else {
+                    stroke(&outline[range], line_width, joint_type, strip, triangles);
+                    continue;
+                };
+
+                // 刻んだ破片はどれも開いた折れ線。輪であっても切れ目ができる。
+                // 模様は輪郭ごとに頭から数え直す。
+                //
+                // 破片の端は元の線の途中なので、折れ線全体の端を見る
+                // `JointType` では届かない。模様の指定で寄せる。
+                let ends = if dash.has_round_ends() {
+                    joint_type.with_round_ends()
+                } else {
+                    joint_type
+                };
+
+                for run in dash_runs(&outline[range], strip, dash) {
+                    stroke(&run, line_width, ends, true, triangles);
+                }
             }
         }
     }
@@ -103,8 +122,8 @@ fn group_contours(contours: &[Vec<Vertex>]) -> Vec<ContourGroup> {
             continue;
         };
 
-        for outer in 0..count {
-            if outer == inner || !contains(&contours[outer], probe) {
+        for (outer, contour) in contours.iter().enumerate() {
+            if outer == inner || !contour_contains(contour, probe) {
                 continue;
             }
 
@@ -119,8 +138,8 @@ fn group_contours(contours: &[Vec<Vertex>]) -> Vec<ContourGroup> {
 
         let mut best: Option<usize> = None;
 
-        for outer in 0..count {
-            if outer == inner || !contains(&contours[outer], probe) {
+        for (outer, contour) in contours.iter().enumerate() {
+            if outer == inner || !contour_contains(contour, probe) {
                 continue;
             }
 
@@ -137,7 +156,7 @@ fn group_contours(contours: &[Vec<Vertex>]) -> Vec<ContourGroup> {
     let mut slot = vec![None; count];
 
     for index in 0..count {
-        if depth[index] % 2 == 0 {
+        if depth[index].is_multiple_of(2) {
             slot[index] = Some(groups.len());
             groups.push(ContourGroup {
                 outer: index,
@@ -147,7 +166,7 @@ fn group_contours(contours: &[Vec<Vertex>]) -> Vec<ContourGroup> {
     }
 
     for index in 0..count {
-        if depth[index] % 2 == 0 {
+        if depth[index].is_multiple_of(2) {
             continue;
         }
 
@@ -207,7 +226,7 @@ fn representative_point(contour: &[Vertex]) -> Option<Vertex> {
 }
 
 /// 点が輪郭の内側にあるか。+X に線を飛ばして、横切った辺を数える。
-fn contains(contour: &[Vertex], point: Vertex) -> bool {
+fn contour_contains(contour: &[Vertex], point: Vertex) -> bool {
     let count = contour.len();
     let mut inside = false;
 
@@ -276,6 +295,56 @@ fn rightmost_x(contour: &[Vertex]) -> f32 {
 /// 3 点の外積。正なら `o -> a -> b` が左に曲がる。
 fn cross(o: Vertex, a: Vertex, b: Vertex) -> f32 {
     (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+}
+
+/// 点が図形の中にあるか。**開いた三角形で判定する。**
+///
+/// # なぜ輪郭ではなく三角形なのか
+///
+/// 輪郭で判定すると、**描かれているものと食い違います。**
+///
+/// - **線**（[`crate::paint_type::PaintType::Stroke`]）は、輪郭の内側ではなく
+///   **帯の上**が図形です。輪郭で見ると、何も塗っていない真ん中が「中」になる
+/// - **穴**は三角形が張られないので、三角形で見れば自動的に外になる。
+///   輪郭で見るなら、偶奇か巻き数の規則を別に決めることになる
+///
+/// 三角形は[描いたものそのもの](crate::object::Object::triangles)なので、
+/// **見えているとおりに当たります。**
+///
+/// 座標は図形のローカル。変換を通した判定は
+/// [`crate::object::Object::hit`] を使います。
+///
+/// ```
+/// # use gueiz_2d::tessellate::contains;
+/// # use gueiz_2d::vertex::Vertex;
+/// let at = |x: f32, y: f32| Vertex::new_position_color(x, y, 0.0, 1.0, 1.0, 1.0, 1.0);
+/// // 10x10 の四角を 2 枚の三角形で。
+/// let triangles = [
+///     at(0.0, 0.0), at(10.0, 0.0), at(10.0, 10.0),
+///     at(0.0, 0.0), at(10.0, 10.0), at(0.0, 10.0),
+/// ];
+///
+/// assert!(contains(&triangles, 5.0, 5.0));
+/// assert!(!contains(&triangles, 15.0, 5.0));
+/// ```
+pub fn contains(triangles: &[Vertex], x: f32, y: f32) -> bool {
+    let point = Vertex::new_position_color(x, y, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+    triangles
+        .chunks_exact(3)
+        .any(|corner| inside_triangle(corner[0], corner[1], corner[2], point))
+}
+
+/// 三角形の内側に点があるか。**巻き方向を問わず、辺の上も内側**。
+///
+/// 巻き方向を決め打ちにしないのは、[`fill`] と [`stroke`] で
+/// 出てくる向きが揃っているとは限らないため。3 つの外積の符号が
+/// 揃っていれば内側、割れていれば外側。
+fn inside_triangle(a: Vertex, b: Vertex, c: Vertex, point: Vertex) -> bool {
+    let sides = [cross(a, b, point), cross(b, c, point), cross(c, a, point)];
+
+    // 0 はどちらにも数えない。辺の上はこれで内側になる。
+    !(sides.iter().any(|side| *side < 0.0) && sides.iter().any(|side| *side > 0.0))
 }
 
 /// 反時計回りの三角形の内側に点があるか。**辺の上も内側として数える**。
@@ -768,28 +837,46 @@ pub fn stroke(
     }
 
     let half_width = line_width * 0.5;
+    let count = outline.len();
 
     // 閉じた輪郭は最後の頂点から先頭へ戻る辺も持つ。
-    let segment_count = if strip {
-        outline.len() - 1
-    } else {
-        outline.len()
-    };
+    let segment_count = if strip { count - 1 } else { count };
+
+    // 角では前後の辺を見るので、向きと長さを先に出しておく。
+    let segments: Vec<Option<Segment>> = (0..segment_count)
+        .map(|index| {
+            let start = outline[index];
+            let end = outline[(index + 1) % count];
+
+            segment_normal(start, end).map(|normal| Segment {
+                normal,
+                length: ((end.x - start.x).powi(2) + (end.y - start.y).powi(2)).sqrt(),
+            })
+        })
+        .collect();
 
     for index in 0..segment_count {
-        let start = outline[index];
-        let end = outline[(index + 1) % outline.len()];
-
-        let Some(normal) = segment_normal(start, end) else {
+        let Some(segment) = segments[index] else {
             // 長さ 0 の辺には向きが無いので飛ばす。
             continue;
         };
 
-        push_quad(start, end, normal, half_width, triangles);
+        let start = outline[index];
+        let end = outline[(index + 1) % count];
+
+        push_quad(
+            start,
+            end,
+            segment.normal,
+            half_width,
+            joint_at(&segments, index, strip, half_width),
+            joint_at(&segments, index + 1, strip, half_width),
+            triangles,
+        );
     }
 
     if joint_type != JointType::None {
-        push_joints(outline, half_width, joint_type, strip, triangles);
+        push_joints(outline, &segments, half_width, joint_type, strip, triangles);
     }
 
     if strip {
@@ -797,7 +884,101 @@ pub fn stroke(
     }
 }
 
-/// 辺に垂直な単位ベクトル（進行方向の左）。長さ 0 の辺なら `None`。
+/// 1 本の辺について、角の処理に要るぶんだけ。
+#[derive(Clone, Copy)]
+struct Segment {
+    normal: [f32; 2],
+    length: f32,
+}
+
+/// 頂点 `vertex` にある角の、内側の交点。角でなければ `None`。
+///
+/// 閉じた輪郭なら端でも前後があります。開いた折れ線の両端には角がありません。
+fn joint_at(
+    segments: &[Option<Segment>],
+    vertex: usize,
+    strip: bool,
+    half_width: f32,
+) -> Option<InnerJoint> {
+    let count = segments.len();
+
+    let (before, after) = if strip {
+        // 先頭と末尾は端。詰める角が無い。
+        if vertex == 0 || vertex >= count {
+            return None;
+        }
+
+        (vertex - 1, vertex)
+    } else {
+        ((vertex + count - 1) % count, vertex % count)
+    };
+
+    inner_miter(segments[before]?, segments[after]?, half_width)
+}
+
+/// 角の内側で、隣り合う帯の縁が交わるところ。
+#[derive(Clone, Copy)]
+struct InnerJoint {
+    /// どちらの側が内側か。`+1` なら法線の向き、`-1` なら逆。
+    side: f32,
+    /// 角からその交点までのずらし。
+    shift: [f32; 2],
+}
+
+/// 角の内側で、隣り合う帯の縁が交わる点を出す。
+///
+/// # なぜ要るか
+///
+/// 辺ごとに幅いっぱいの帯を置くと、曲がった**内側で半幅ぶん重なります**。
+/// 単色で塗りつぶすだけなら見えませんが、
+///
+/// - 頂点ごとに色を変えると、重なったところだけ色が飛ぶ
+/// - 半透明にすると、重なったところだけ濃くなる
+///
+/// 内側をこの交点まで詰めれば重なりません。詰めたぶん**継ぎ目の付け根も
+/// ここへ動かす**ので、隙間も開きません（[`push_joints`]）。
+///
+/// # 詰めない場合
+///
+/// - まっすぐ、または 180 度の折り返し（角が無い、交点が飛ぶ）
+/// - 辺が短くて、詰めると帯が裏返る
+///
+/// どちらも `None` を返し、**元どおり重ねたまま**にします。壊れるよりましです。
+fn inner_miter(before: Segment, after: Segment, half_width: f32) -> Option<InnerJoint> {
+    let (before_normal, after_normal) = (before.normal, after.normal);
+
+    // 曲がる向きで内側が決まる。法線は向きを 90 度回したものなので、
+    // 法線どうしの外積は向きどうしの外積と同じ符号になる。
+    let turn = before_normal[0] * after_normal[1] - before_normal[1] * after_normal[0];
+
+    if turn.abs() < f32::EPSILON {
+        return None;
+    }
+
+    let spread = 1.0 + before_normal[0] * after_normal[0] + before_normal[1] * after_normal[1];
+
+    // 折り返しに近いと交点が遠くへ飛ぶ。
+    if spread < f32::EPSILON {
+        return None;
+    }
+
+    let side = if turn > 0.0 { 1.0 } else { -1.0 };
+    let shift = [
+        side * half_width * (before_normal[0] + after_normal[0]) / spread,
+        side * half_width * (before_normal[1] + after_normal[1]) / spread,
+    ];
+
+    // 辺に沿ってどれだけ引っ込むか。辺の半分を超えると、
+    // 両端から詰めたときに行き過ぎて帯が裏返る。
+    let pull = |normal: [f32; 2]| (shift[0] * normal[1] - shift[1] * normal[0]).abs();
+
+    if pull(before_normal) > before.length * 0.5 || pull(after_normal) > after.length * 0.5 {
+        return None;
+    }
+
+    Some(InnerJoint { side, shift })
+}
+
 fn segment_normal(start: Vertex, end: Vertex) -> Option<[f32; 2]> {
     let direction_x = end.x - start.x;
     let direction_y = end.y - start.y;
@@ -824,15 +1005,12 @@ fn push_quad(
     end: Vertex,
     normal: [f32; 2],
     half_width: f32,
+    start_joint: Option<InnerJoint>,
+    end_joint: Option<InnerJoint>,
     triangles: &mut Vec<Vertex>,
 ) {
-    let [nx, ny] = normal;
-    let (dx, dy) = (nx * half_width, ny * half_width);
-
-    let start_left = offset(start, dx, dy);
-    let start_right = offset(start, -dx, -dy);
-    let end_left = offset(end, dx, dy);
-    let end_right = offset(end, -dx, -dy);
+    let (start_left, start_right) = band_ends(start, normal, half_width, start_joint);
+    let (end_left, end_right) = band_ends(end, normal, half_width, end_joint);
 
     triangles.push(start_left);
     triangles.push(start_right);
@@ -843,9 +1021,38 @@ fn push_quad(
     triangles.push(end_left);
 }
 
-/// 角の外側にできる隙間を埋める。
+/// 帯の片端にある 2 点。**内側だけ**、角の交点まで引っ込める。
+///
+/// 外側は隙間が空く側なので、そのまま真横に出します。そこは
+/// [`push_joints`] が埋めます。
+fn band_ends(
+    point: Vertex,
+    normal: [f32; 2],
+    half_width: f32,
+    joint: Option<InnerJoint>,
+) -> (Vertex, Vertex) {
+    let [nx, ny] = normal;
+    let (dx, dy) = (nx * half_width, ny * half_width);
+
+    let straight_left = offset(point, dx, dy);
+    let straight_right = offset(point, -dx, -dy);
+
+    match joint {
+        Some(InnerJoint { side, shift }) if side > 0.0 => {
+            (offset(point, shift[0], shift[1]), straight_right)
+        }
+
+        Some(InnerJoint { shift, .. }) => {
+            (straight_left, offset(point, shift[0], shift[1]))
+        }
+
+        None => (straight_left, straight_right),
+    }
+}
+
 fn push_joints(
     outline: &[Vertex],
+    segments: &[Option<Segment>],
     half_width: f32,
     joint_type: JointType,
     strip: bool,
@@ -880,31 +1087,42 @@ fn push_joints(
         let from = [incoming[0] * sign, incoming[1] * sign];
         let to = [outgoing[0] * sign, outgoing[1] * sign];
 
+        // 帯を内側で詰めたぶん、継ぎ目の付け根もそこへ動かす。
+        // 動かさないと、詰めたところに三角形の穴が残る。
+        let apex = match joint_at(segments, index, strip, half_width) {
+            Some(InnerJoint { shift, .. }) => offset(corner, shift[0], shift[1]),
+            None => corner,
+        };
+
         if joint_type.is_round() {
-            push_round_joint(corner, from, to, half_width, triangles);
+            push_round_joint(apex, corner, from, to, half_width, triangles);
         } else if joint_type == JointType::Miter {
-            push_miter_joint(corner, from, to, half_width, triangles);
+            push_miter_joint(apex, corner, from, to, half_width, triangles);
         } else {
-            push_bevel_joint(corner, from, to, half_width, triangles);
+            push_bevel_joint(apex, corner, from, to, half_width, triangles);
         }
     }
 }
 
-/// 外側の角を三角形 1 枚で塞ぐ。
+/// 角の外側を三角形 1 枚で塞ぐ。
+///
+/// `apex` は継ぎ目の付け根。帯を内側で詰めていれば、その交点が来ます。
+/// **`corner` とは別**で、円弧や尖りは `corner` を中心に出します。
 fn push_bevel_joint(
+    apex: Vertex,
     corner: Vertex,
     from: [f32; 2],
     to: [f32; 2],
     half_width: f32,
     triangles: &mut Vec<Vertex>,
 ) {
-    triangles.push(corner);
+    triangles.push(apex);
     triangles.push(offset(corner, from[0] * half_width, from[1] * half_width));
     triangles.push(offset(corner, to[0] * half_width, to[1] * half_width));
 }
 
-/// 外側の辺を延長して尖らせる。鋭すぎるときはベベルに落とす。
 fn push_miter_joint(
+    apex: Vertex,
     corner: Vertex,
     from: [f32; 2],
     to: [f32; 2],
@@ -916,7 +1134,7 @@ fn push_miter_joint(
     let length = (sum_x * sum_x + sum_y * sum_y).sqrt();
 
     if length < f32::EPSILON {
-        push_bevel_joint(corner, from, to, half_width, triangles);
+        push_bevel_joint(apex, corner, from, to, half_width, triangles);
         return;
     }
 
@@ -926,7 +1144,7 @@ fn push_miter_joint(
     // 2 つの法線の中間方向と法線のなす角から、飛び出し量が決まる。
     let cosine = miter_x * from[0] + miter_y * from[1];
     if cosine < f32::EPSILON || 1.0 / cosine > MITER_LIMIT {
-        push_bevel_joint(corner, from, to, half_width, triangles);
+        push_bevel_joint(apex, corner, from, to, half_width, triangles);
         return;
     }
 
@@ -936,17 +1154,17 @@ fn push_miter_joint(
     let from_point = offset(corner, from[0] * half_width, from[1] * half_width);
     let to_point = offset(corner, to[0] * half_width, to[1] * half_width);
 
-    triangles.push(corner);
+    triangles.push(apex);
     triangles.push(from_point);
     triangles.push(tip);
 
-    triangles.push(corner);
+    triangles.push(apex);
     triangles.push(tip);
     triangles.push(to_point);
 }
 
-/// 外側の角を扇形で丸める。
 fn push_round_joint(
+    apex: Vertex,
     corner: Vertex,
     from: [f32; 2],
     to: [f32; 2],
@@ -965,35 +1183,15 @@ fn push_round_joint(
         sweep += 2.0 * PI;
     }
 
-    push_fan(corner, start_angle, sweep, half_width, triangles);
+    push_fan(apex, corner, start_angle, sweep, half_width, triangles);
 }
 
-/// 開いた折れ線の端を半円で閉じる。
-fn push_caps(
-    outline: &[Vertex],
-    half_width: f32,
-    joint_type: JointType,
-    triangles: &mut Vec<Vertex>,
-) {
-    if joint_type.caps_start() {
-        if let Some(normal) = segment_normal(outline[0], outline[1]) {
-            // 帯の左端から右端へ、進行方向と逆回りに半円を張る。
-            let start_angle = normal[1].atan2(normal[0]);
-            push_fan(outline[0], start_angle, PI, half_width, triangles);
-        }
-    }
-
-    if joint_type.caps_end() {
-        let last = outline.len() - 1;
-        if let Some(normal) = segment_normal(outline[last - 1], outline[last]) {
-            let start_angle = normal[1].atan2(normal[0]);
-            push_fan(outline[last], start_angle, -PI, half_width, triangles);
-        }
-    }
-}
-
-/// `center` を要とした扇形。`sweep` はラジアン、符号が回る向き。
+/// 扇。`apex` から出て、`center` のまわりの弧を張る。
+///
+/// 端を丸めるときは `apex` と `center` が同じですが、角の継ぎ目では
+/// 帯を詰めた交点が `apex` に来るので、別々に受け取ります。
 fn push_fan(
+    apex: Vertex,
     center: Vertex,
     start_angle: f32,
     sweep: f32,
@@ -1008,7 +1206,7 @@ fn push_fan(
         let angle = start_angle + step * index as f32;
         let next_angle = angle + step;
 
-        triangles.push(center);
+        triangles.push(apex);
         triangles.push(offset(center, angle.cos() * radius, angle.sin() * radius));
         triangles.push(offset(
             center,
@@ -1018,9 +1216,385 @@ fn push_fan(
     }
 }
 
+fn push_caps(
+    outline: &[Vertex],
+    half_width: f32,
+    joint_type: JointType,
+    triangles: &mut Vec<Vertex>,
+) {
+    if joint_type.caps_start()
+        && let Some(normal) = segment_normal(outline[0], outline[1])
+    {
+        // 帯の左端から右端へ、進行方向と逆回りに半円を張る。
+        let start_angle = normal[1].atan2(normal[0]);
+        push_fan(outline[0], outline[0], start_angle, PI, half_width, triangles);
+    }
+
+    let last = outline.len() - 1;
+
+    if joint_type.caps_end()
+        && let Some(normal) = segment_normal(outline[last - 1], outline[last])
+    {
+        let start_angle = normal[1].atan2(normal[0]);
+        push_fan(outline[last], outline[last], start_angle, -PI, half_width, triangles);
+    }
+}
+
+/// 折れ線を模様どおりに刻んで、描くところだけを取り出す。
+///
+/// 返るのはどれも**開いた折れ線**です。輪であっても刻めば切れ目ができるので、
+/// 破片に閉じた輪はありません。
+///
+/// 刻む位置の頂点は前後から混ぜて作るので、色も uv も法線も線に沿って続きます。
+pub fn dash_runs(outline: &[Vertex], strip: bool, dash: Dash) -> Vec<Vec<Vertex>> {
+    // 模様として成り立たないものは刻まない。1 本の線として返す。
+    if outline.len() < 2 || !dash.is_usable() {
+        return vec![outline.to_vec()];
+    }
+
+    let mut points = outline.to_vec();
+
+    // 閉じた輪は最後に先頭へ戻る辺も持つ。
+    if !strip {
+        points.push(outline[0]);
+    }
+
+    let mut runs = Vec::new();
+    let mut current: Vec<Vertex> = Vec::new();
+    let mut travelled = 0.0;
+
+    for pair in points.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let length = ((to.x - from.x).powi(2) + (to.y - from.y).powi(2)).sqrt();
+
+        if !(length.is_finite() && length > 0.0) {
+            continue;
+        }
+
+        let mut walked = 0.0;
+
+        while walked < length {
+            let (drawn, remaining) = dash.at(travelled + walked);
+
+            let step = remaining.min(length - walked);
+
+            // `Dash::at` は必ず正の長さを返すので、ここには来ない。
+            // 来たら模様が壊れているので、切り上げて先へ進む。
+            // NaN も弾きたいので、正であることを直接確かめる。
+            if !step.is_finite() || step <= 0.0 {
+                break;
+            }
+
+            if drawn {
+                // 続きなら入口は置かない。前の辺の出口と同じ点になる。
+                if current.is_empty() {
+                    current.push(mix(from, to, walked / length));
+                }
+
+                current.push(mix(from, to, (walked + step) / length));
+            } else if !current.is_empty() {
+                runs.push(std::mem::take(&mut current));
+            }
+
+            walked += step;
+        }
+
+        travelled += length;
+    }
+
+    if !current.is_empty() {
+        runs.push(current);
+    }
+
+    // 刻んだ結果、描くところが 1 つも無いこともある。
+    runs.retain(|run| run.len() >= 2);
+    runs
+}
+
+/// 頂点を丸ごと混ぜる。位置だけでなく色も uv も法線も。
+fn mix(from: Vertex, to: Vertex, ratio: f32) -> Vertex {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let blend = |a: f32, b: f32| a + (b - a) * ratio;
+
+    Vertex::new_position_color_uv_normal(
+        blend(from.x, to.x),
+        blend(from.y, to.y),
+        blend(from.z, to.z),
+        blend(from.r, to.r),
+        blend(from.g, to.g),
+        blend(from.b, to.b),
+        blend(from.a, to.a),
+        blend(from.u, to.u),
+        blend(from.v, to.v),
+        blend(from.n_x, to.n_x),
+        blend(from.n_y, to.n_y),
+        blend(from.n_z, to.n_z),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn to_vertices(points: &[(f32, f32)]) -> Vec<Vertex> {
+        points
+            .iter()
+            .map(|(x, y)| Vertex::new_position_color(*x, *y, 0.0, 1.0, 1.0, 1.0, 1.0))
+            .collect()
+    }
+
+    /// 1 つの輪郭を塗って三角形にする。
+    fn filled(points: &[(f32, f32)]) -> Vec<Vertex> {
+        let mut triangles = Vec::new();
+        fill(&to_vertices(points), &[0], &mut triangles);
+
+        triangles
+    }
+
+    // --- 角で帯が重ならないこと ---
+
+    /// 四角に線を引いた三角形。
+    fn ring(width: f32, height: f32, line_width: f32, joint_type: JointType) -> Vec<Vertex> {
+        let outline = to_vertices(&[
+            (0.0, 0.0),
+            (width, 0.0),
+            (width, height),
+            (0.0, height),
+        ]);
+
+        let mut triangles = Vec::new();
+        stroke(&outline, line_width, joint_type, false, &mut triangles);
+
+        triangles
+    }
+
+    /// **角で帯が重なっていないこと。** ここが今回の要点。
+    ///
+    /// 辺ごとに幅いっぱいの帯を置くと、曲がった内側で半幅ぶん重なります。
+    /// 単色なら見えませんが、頂点ごとに色を変えると重なったところだけ色が飛び、
+    /// 半透明なら濃くなります。
+    ///
+    /// 尖らせる継ぎ目なら、外周は角まできっちり四角。面積が読めるので、
+    /// 三角形の合計と突き合わせれば重なりの有無が分かります。
+    #[test]
+    fn the_bands_do_not_overlap_at_the_corners() {
+        for line_width in [10.0_f32, 50.0, 90.0] {
+            let half = line_width / 2.0;
+
+            // 外側 (200+w) x (100+w) から、内側の穴を抜いたもの。
+            let painted = (200.0 + line_width) * (100.0 + line_width)
+                - (200.0 - line_width) * (100.0 - line_width);
+            let total = total_area(&ring(200.0, 100.0, line_width, JointType::Miter));
+
+            assert!(
+                (total - painted).abs() < 0.5,
+                "幅 {line_width}: 三角形 {total} に対して実面積 {painted}。                 差 {} は角 4 つぶんの重なり（{}）に近いか？",
+                total - painted,
+                4.0 * half * half,
+            );
+        }
+    }
+
+    /// 角を落とす継ぎ目でも重ならない。
+    #[test]
+    fn bevelled_corners_do_not_overlap_either() {
+        let line_width = 50.0_f32;
+        let half = line_width / 2.0;
+
+        // 尖りを落としたぶん、四隅から直角三角形が消える。
+        let painted = (200.0 + line_width) * (100.0 + line_width)
+            - 4.0 * half * half * 0.5
+            - (200.0 - line_width) * (100.0 - line_width);
+
+        let total = total_area(&ring(200.0, 100.0, line_width, JointType::Bevel));
+
+        assert!((total - painted).abs() < 0.5, "{total} != {painted}");
+    }
+
+    /// 開いた折れ線の角でも重ならない。
+    #[test]
+    fn an_open_corner_does_not_overlap() {
+        let outline = to_vertices(&[(0.0, 0.0), (200.0, 0.0), (200.0, 150.0)]);
+        let mut triangles = Vec::new();
+        stroke(&outline, 40.0, JointType::Miter, true, &mut triangles);
+
+        // 帯 2 本ぶんから角の重なりを引き、尖らせた外側を足す。
+        let painted = 200.0 * 40.0 + 150.0 * 40.0 - 20.0 * 20.0 + 20.0 * 20.0;
+
+        assert!((total_area(&triangles) - painted).abs() < 0.5);
+    }
+
+    /// 詰めても**内側に穴が開かない**こと。
+    ///
+    /// 帯だけ詰めて継ぎ目の付け根を角に残すと、角の内側に三角形の穴が残ります。
+    /// 付け根も交点へ動かしているので、そこが埋まっていること。
+    #[test]
+    fn trimming_leaves_no_gap_at_the_corner() {
+        let triangles = ring(200.0, 100.0, 50.0, JointType::Round);
+
+        // 左上の角のまわり。穴 (25..175 x 25..75) の外で、外周の内側。
+        for (x, y) in [
+            (5.0, 5.0),
+            (10.0, 10.0),
+            (15.0, 15.0),
+            (20.0, 20.0),
+            (24.0, 12.0),
+            (12.0, 24.0),
+        ] {
+            assert!(contains(&triangles, x, y), "({x}, {y}) に穴が開いている");
+        }
+    }
+
+    /// 詰めても**塗る範囲は変わらない**こと。穴の大きさも外周も同じ。
+    #[test]
+    fn trimming_does_not_change_what_is_painted() {
+        let triangles = ring(200.0, 100.0, 50.0, JointType::Miter);
+
+        // 穴の中。
+        assert!(!contains(&triangles, 100.0, 50.0));
+        assert!(!contains(&triangles, 26.0, 26.0), "穴のすぐ内");
+        // 帯の上。
+        assert!(contains(&triangles, 24.0, 24.0), "穴のすぐ外");
+        assert!(contains(&triangles, 100.0, 0.0), "上の辺");
+        assert!(contains(&triangles, 0.0, 50.0), "左の辺");
+        // 外周の外。
+        assert!(!contains(&triangles, 100.0, -26.0));
+        assert!(!contains(&triangles, -26.0, 50.0));
+    }
+
+    /// 辺が短すぎるときは詰めない。詰めると帯が裏返って形が壊れる。
+    /// 重なったままだが、壊れるよりはまし。
+    #[test]
+    fn a_segment_too_short_to_trim_is_left_alone() {
+        // 一辺 10 に対して幅 50。詰めようとすると行き過ぎる。
+        let triangles = ring(10.0, 10.0, 50.0, JointType::Miter);
+
+        // 裏返っていなければ、真ん中は塗られている。
+        assert!(contains(&triangles, 5.0, 5.0), "形が壊れている");
+        assert!(contains(&triangles, 0.0, 0.0));
+    }
+
+    // --- 点が中にあるか ---
+
+    /// 四角の中と外。いちばん基本。
+    #[test]
+    fn a_point_inside_the_shape_is_found() {
+        let square = filled(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+
+        assert!(contains(&square, 5.0, 5.0));
+        assert!(contains(&square, 0.5, 9.5));
+
+        assert!(!contains(&square, -0.5, 5.0));
+        assert!(!contains(&square, 10.5, 5.0));
+        assert!(!contains(&square, 5.0, -0.5));
+        assert!(!contains(&square, 5.0, 10.5));
+    }
+
+    /// 縁は中。外にすると、縁を狙ったときに 1 画素ぶん反応しない。
+    #[test]
+    fn the_edge_counts_as_inside() {
+        let square = filled(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+
+        assert!(contains(&square, 0.0, 0.0), "角");
+        assert!(contains(&square, 10.0, 10.0), "反対の角");
+        assert!(contains(&square, 0.0, 5.0), "辺の上");
+        assert!(contains(&square, 5.0, 0.0), "辺の上");
+    }
+
+    /// 三角形を割った対角線の上でも落ちない。
+    /// 片方の三角形から見て外でも、もう片方から見れば中。
+    #[test]
+    fn the_seam_between_triangles_is_still_inside() {
+        let square = filled(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+
+        for step in 0..=10 {
+            let along = step as f32;
+            assert!(contains(&square, along, along), "対角線上の {along}");
+        }
+    }
+
+    /// **穴は外。** 三角形が張られていないので自動的にそうなる。
+    /// 輪郭で判定していたら、ここを別に処理することになる。
+    #[test]
+    fn a_hole_is_outside() {
+        // 外周 20x20、中に 10x10 の穴。
+        let outline = to_vertices(&[
+            (0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0),
+            (5.0, 5.0), (15.0, 5.0), (15.0, 15.0), (5.0, 15.0),
+        ]);
+        let mut triangles = Vec::new();
+        fill(&outline, &[0, 4], &mut triangles);
+
+        assert!(contains(&triangles, 2.0, 10.0), "外周の帯は中");
+        assert!(contains(&triangles, 18.0, 10.0), "反対側の帯も中");
+        assert!(!contains(&triangles, 10.0, 10.0), "穴の真ん中は外");
+        assert!(!contains(&triangles, 25.0, 10.0), "外は外");
+    }
+
+    /// **線は帯の上だけが中。** 囲まれた内側は塗っていないので外。
+    /// ここが輪郭で判定した場合といちばん食い違う。
+    #[test]
+    fn a_stroke_is_only_inside_on_the_band() {
+        let outline = to_vertices(&[(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)]);
+        let mut triangles = Vec::new();
+        stroke(&outline, 4.0, JointType::Miter, false, &mut triangles);
+
+        assert!(contains(&triangles, 0.0, 20.0), "左の線の上");
+        assert!(contains(&triangles, 40.0, 20.0), "右の線の上");
+        assert!(!contains(&triangles, 20.0, 20.0), "囲まれた真ん中は塗っていない");
+        assert!(!contains(&triangles, 60.0, 20.0), "外は外");
+    }
+
+    /// 離れた輪郭は、どちらの側でも中。
+    #[test]
+    fn separate_contours_are_both_inside() {
+        let outline = to_vertices(&[
+            (0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0),
+            (20.0, 0.0), (30.0, 0.0), (30.0, 10.0), (20.0, 10.0),
+        ]);
+        let mut triangles = Vec::new();
+        fill(&outline, &[0, 4], &mut triangles);
+
+        assert!(contains(&triangles, 5.0, 5.0), "左の島");
+        assert!(contains(&triangles, 25.0, 5.0), "右の島");
+        assert!(!contains(&triangles, 15.0, 5.0), "あいだは外");
+    }
+
+    /// 三角形が 1 枚も無ければ、どこも中ではない。
+    #[test]
+    fn nothing_is_inside_an_empty_shape() {
+        assert!(!contains(&[], 0.0, 0.0));
+        assert!(!contains(&[], 5.0, 5.0));
+    }
+
+    /// 巻き方向を変えても同じに当たる。向きを決め打ちにしていないこと。
+    #[test]
+    fn the_winding_direction_does_not_matter() {
+        let clockwise = filled(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let widdershins = filled(&[(0.0, 10.0), (10.0, 10.0), (10.0, 0.0), (0.0, 0.0)]);
+
+        for (x, y) in [(5.0, 5.0), (1.0, 9.0), (9.0, 1.0)] {
+            assert_eq!(
+                contains(&clockwise, x, y),
+                contains(&widdershins, x, y),
+                "({x}, {y}) で食い違う",
+            );
+        }
+    }
+
+    /// 凹んだ形。出っ張りの外は外、くぼみの中も外。
+    #[test]
+    fn a_concave_shape_excludes_its_notch() {
+        // L 字。右上が欠けている。
+        let l_shape = filled(&[
+            (0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (5.0, 5.0), (5.0, 10.0), (0.0, 10.0),
+        ]);
+
+        assert!(contains(&l_shape, 2.0, 2.0), "根本");
+        assert!(contains(&l_shape, 8.0, 2.0), "横の腕");
+        assert!(contains(&l_shape, 2.0, 8.0), "縦の腕");
+        assert!(!contains(&l_shape, 8.0, 8.0), "欠けたところは外");
+    }
 
     fn point(x: f32, y: f32) -> Vertex {
         Vertex::new_position_color(x, y, 0.0, 1.0, 1.0, 1.0, 1.0)
@@ -1726,6 +2300,7 @@ mod tests {
             line_width: 4.0,
             joint_type: JointType::Miter,
             strip: false,
+            dash: None,
         };
 
         let mut one = Vec::new();
@@ -1771,5 +2346,380 @@ mod tests {
             &mut triangles,
         );
         assert!(triangles.is_empty(), "a zero-width stroke draws nothing");
+    }
+
+    // --- 破線 ---
+
+    use crate::paint_type::MAX_DASH;
+
+    /// 三角形が塗る面積の合計。重なりは数え直さない。
+    fn area(triangles: &[Vertex]) -> f32 {
+        triangles
+            .chunks_exact(3)
+            .map(|t| {
+                ((t[1].x - t[0].x) * (t[2].y - t[0].y) - (t[2].x - t[0].x) * (t[1].y - t[0].y))
+                    .abs()
+                    / 2.0
+            })
+            .sum()
+    }
+
+    /// 横一直線。長さ `length`。
+    fn straight(length: f32) -> Vec<Vertex> {
+        to_vertices(&[(0.0, 0.0), (length, 0.0)])
+    }
+
+    /// 刻んだ破片ごとの、始まりと終わりの x。
+    fn pieces(outline: &[Vertex], strip: bool, dash: Dash) -> Vec<(f32, f32)> {
+        dash_runs(outline, strip, dash)
+            .iter()
+            .map(|run| (run[0].x, run[run.len() - 1].x))
+            .collect()
+    }
+
+    /// 刻んだあとに残る長さの合計。
+    fn drawn_length(outline: &[Vertex], strip: bool, dash: Dash) -> f32 {
+        dash_runs(outline, strip, dash)
+            .iter()
+            .flat_map(|run| run.windows(2))
+            .map(|pair| ((pair[1].x - pair[0].x).powi(2) + (pair[1].y - pair[0].y).powi(2)).sqrt())
+            .sum()
+    }
+
+    /// 刻んだ場所が、思った所に来ているか。
+    ///
+    /// 混ぜて作る点なので `100.0 * 0.3` が `30.000002` になる。ぴったりでは比べない。
+    fn assert_pieces(got: &[(f32, f32)], want: &[(f32, f32)]) {
+        assert_eq!(got.len(), want.len(), "本数が違う。{got:?}");
+
+        for (got, want) in got.iter().zip(want) {
+            assert!(
+                (got.0 - want.0).abs() < 0.01 && (got.1 - want.1).abs() < 0.01,
+                "{got:?} は {want:?} のはず",
+            );
+        }
+    }
+
+    #[test]
+    fn a_dash_cuts_the_line_into_pieces() {
+        // 100 の線を「10 描いて 10 空ける」。5 本になる。
+        let got = pieces(&straight(100.0), true, Dash::new(10.0, 10.0));
+
+        assert_pieces(
+            &got,
+            &[(0.0, 10.0), (20.0, 30.0), (40.0, 50.0), (60.0, 70.0), (80.0, 90.0)],
+        );
+    }
+
+    #[test]
+    fn the_drawn_length_matches_the_pattern() {
+        // 描くと空けるが同じなら、残るのは半分。
+        let got = drawn_length(&straight(100.0), true, Dash::new(10.0, 10.0));
+        assert!((got - 50.0).abs() < 0.01, "{got}");
+
+        // 3 対 1 なら 4 分の 3。
+        let got = drawn_length(&straight(100.0), true, Dash::new(15.0, 5.0));
+        assert!((got - 75.0).abs() < 0.01, "{got}");
+    }
+
+    /// 刻む位置が辺をまたいでも、破片は 1 本につながる。
+    #[test]
+    fn a_piece_carries_across_a_corner() {
+        // 角が (50, 0) にある折れ線。50 描いて 10 空けるので、
+        // 1 本目は角をまたいで (50, 40) まで伸びる。
+        let outline = to_vertices(&[(0.0, 0.0), (50.0, 0.0), (50.0, 100.0)]);
+        let runs = dash_runs(&outline, true, Dash::new(60.0, 10.0));
+
+        let first = &runs[0];
+
+        assert_eq!(first.len(), 3, "角の頂点が落ちている");
+        assert_eq!((first[0].x, first[0].y), (0.0, 0.0));
+        assert_eq!((first[1].x, first[1].y), (50.0, 0.0), "角");
+        assert!((first[2].y - 10.0).abs() < 0.01, "{:?}", first[2].y);
+    }
+
+    /// 刻んだ切り口の頂点は前後から混ぜて作る。色も uv も線に沿って続く。
+    #[test]
+    fn a_cut_blends_the_attributes() {
+        let mut outline = straight(100.0);
+        outline[0].r = 0.0;
+        outline[1].r = 1.0;
+        outline[0].u = 0.0;
+        outline[1].u = 1.0;
+
+        let runs = dash_runs(&outline, true, Dash::new(50.0, 50.0));
+
+        // 50 のところで切れる。半分なので赤も uv も半分。
+        let cut = runs[0][1];
+
+        assert!((cut.r - 0.5).abs() < 0.01, "赤 {}", cut.r);
+        assert!((cut.u - 0.5).abs() < 0.01, "uv {}", cut.u);
+    }
+
+    #[test]
+    fn the_offset_slides_the_pattern() {
+        // 模様を 10 ずらすと、空けるところから始まる。
+        let got = pieces(&straight(40.0), true, Dash::new(10.0, 10.0).offset(10.0));
+
+        assert_pieces(&got, &[(10.0, 20.0), (30.0, 40.0)]);
+    }
+
+    #[test]
+    fn the_offset_wraps_round() {
+        // ひと回りぶんずらしても元と同じ。
+        let plain = pieces(&straight(100.0), true, Dash::new(10.0, 10.0));
+        let wrapped = pieces(&straight(100.0), true, Dash::new(10.0, 10.0).offset(20.0));
+
+        assert_eq!(plain, wrapped);
+    }
+
+    /// 閉じた輪は先頭へ戻る辺も刻む。
+    #[test]
+    fn a_closed_contour_dashes_all_the_way_round() {
+        // 1 辺 40 の四角。周は 160。
+        let square = to_vertices(&[(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)]);
+
+        let closed = drawn_length(&square, false, Dash::new(10.0, 10.0));
+        let open = drawn_length(&square, true, Dash::new(10.0, 10.0));
+
+        // 閉じれば 1 辺ぶん長い。
+        assert!((closed - 80.0).abs() < 0.01, "閉じた輪 {closed}");
+        assert!((open - 60.0).abs() < 0.01, "開いた折れ線 {open}");
+    }
+
+    /// 刻んだ破片に閉じた輪は無い。輪でも切れ目ができる。
+    #[test]
+    fn dashing_a_ring_never_leaves_a_closed_piece() {
+        let square = to_vertices(&[(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)]);
+
+        for run in dash_runs(&square, false, Dash::new(10.0, 10.0)) {
+            let (first, last) = (run[0], run[run.len() - 1]);
+            let gap = ((last.x - first.x).powi(2) + (last.y - first.y).powi(2)).sqrt();
+
+            assert!(gap > 0.01, "端どうしが重なっている");
+        }
+    }
+
+    // --- 模様の組み立て ---
+
+    #[test]
+    fn an_odd_pattern_is_repeated_to_even_it_out() {
+        // 奇数だと描くと空けるが一周ごとに入れ替わる。繰り返して均す。
+        let dash = Dash::pattern(&[4.0, 2.0, 1.0]);
+
+        assert_eq!(dash.lengths(), &[4.0, 2.0, 1.0, 4.0, 2.0, 1.0]);
+        assert_eq!(dash.period(), 14.0);
+    }
+
+    /// 1 つだけ渡したら「同じ長さで描いて空ける」。SVG と同じ読み方。
+    #[test]
+    fn a_single_length_means_equal_on_and_off() {
+        let dash = Dash::pattern(&[10.0]);
+
+        assert_eq!(dash.lengths(), &[10.0, 10.0]);
+        assert_eq!(dash, Dash::new(10.0, 10.0));
+    }
+
+    #[test]
+    fn an_even_pattern_is_left_alone() {
+        let dash = Dash::pattern(&[4.0, 2.0]);
+
+        assert_eq!(dash.lengths(), &[4.0, 2.0]);
+    }
+
+    #[test]
+    fn a_pattern_that_is_too_long_is_cut_to_an_even_count() {
+        let dash = Dash::pattern(&[1.0; 20]);
+
+        assert_eq!(dash.lengths().len(), MAX_DASH);
+        assert!(dash.lengths().len().is_multiple_of(2));
+    }
+
+    #[test]
+    fn an_unusable_pattern_draws_one_solid_line() {
+        let outline = straight(100.0);
+
+        for (lengths, note) in [
+            (vec![], "空"),
+            (vec![10.0, 0.0], "0 が混ざる"),
+            (vec![10.0, -5.0], "負が混ざる"),
+            (vec![10.0, f32::NAN], "数でない"),
+        ] {
+            let dash = Dash::pattern(&lengths);
+
+            assert!(!dash.is_usable(), "{note} が使えることになっている");
+
+            let runs = dash_runs(&outline, true, dash);
+
+            assert_eq!(runs.len(), 1, "{note} で刻まれた");
+            assert_eq!(runs[0].len(), 2, "{note} で頂点が変わった");
+        }
+    }
+
+    #[test]
+    fn a_pattern_longer_than_the_line_leaves_one_piece() {
+        // 描くところが線より長い。切れ目は出ない。
+        let got = pieces(&straight(30.0), true, Dash::new(100.0, 10.0));
+
+        assert_pieces(&got, &[(0.0, 30.0)]);
+    }
+
+    #[test]
+    fn a_line_that_lands_entirely_in_a_gap_draws_nothing() {
+        // 空けるところから始めて、線が終わるまで空いたまま。
+        let dash = Dash::new(10.0, 100.0).offset(10.0);
+
+        assert!(dash_runs(&straight(30.0), true, dash).is_empty());
+    }
+
+    #[test]
+    fn dots_are_a_very_short_dash() {
+        let dash = Dash::dots(10.0);
+
+        assert!(dash.is_usable());
+        assert!(dash.lengths()[0] < 0.1, "点が長すぎる");
+        assert_eq!(dash.lengths()[1], 10.0);
+        assert!(dash.has_round_ends(), "端が丸まらないと点が現れない");
+
+        let runs = dash_runs(&straight(100.0), true, dash);
+        assert_eq!(runs.len(), 10);
+    }
+
+    /// **`JointType` を選ばずに点が出ること。**
+    ///
+    /// 刻んでできた端は元の線の途中なので、折れ線全体の端しか見ない
+    /// `JointType` では届かない。ここが届いていないと、点は
+    /// 面積のない極細の棒になって消える。
+    #[test]
+    fn dots_show_up_whatever_the_joint_type_is() {
+        for joint_type in [
+            JointType::None,
+            JointType::Miter,
+            JointType::Bevel,
+            JointType::Round,
+            JointType::RoundStartEnd,
+        ] {
+            let mut triangles = Vec::new();
+            tessellate(
+                &straight(100.0),
+                &[0],
+                PaintType::Stroke {
+                    line_width: 10.0,
+                    joint_type,
+                    strip: true,
+                    // 間隔は線の太さより広く取る。同じだと点どうしが接する。
+                    dash: Some(Dash::dots(30.0)),
+                },
+                &mut triangles,
+            );
+
+            // 半径 5 の丸が 4 個で 314。折れ線で近似するぶん少し減る。
+            let painted = area(&triangles);
+
+            assert!(
+                painted > 280.0,
+                "{joint_type:?} で点が潰れている（面積 {painted:.2}）",
+            );
+
+            // 点の真ん中は塗られ、間は空いている。
+            assert!(contains(&triangles, 0.0, 0.0), "{joint_type:?} 1 つめの点");
+            assert!(contains(&triangles, 30.0, 0.0), "{joint_type:?} 2 つめの点");
+            assert!(!contains(&triangles, 15.0, 0.0), "{joint_type:?} 点の間が埋まっている");
+        }
+    }
+
+    /// 間隔を広げても点は消えない。
+    ///
+    /// 点の長さを決め打ちにすると、模様の切り替わり際を見る丸め誤差の幅に
+    /// 飲み込まれて消える。間隔に対する割合にしてあるのはそのため。
+    #[test]
+    fn dots_survive_a_wide_gap() {
+        for gap in [1.0, 10.0, 100.0, 10_000.0] {
+            let dash = Dash::dots(gap);
+            let runs = dash_runs(&straight(gap * 10.0), true, dash);
+
+            assert_eq!(runs.len(), 10, "間隔 {gap} で点の数が合わない");
+        }
+    }
+
+    /// 破線も端を丸められる。点線だけの仕組みではない。
+    #[test]
+    fn a_dash_can_have_round_ends_too() {
+        let plain = Dash::new(10.0, 10.0);
+        let round = Dash::new(10.0, 10.0).round_ends(true);
+
+        assert!(!plain.has_round_ends());
+        assert!(round.has_round_ends());
+
+        let paint = |dash| PaintType::Stroke {
+            line_width: 10.0,
+            joint_type: JointType::Miter,
+            strip: true,
+            dash: Some(dash),
+        };
+
+        let mut square_ends = Vec::new();
+        tessellate(&straight(100.0), &[0], paint(plain), &mut square_ends);
+
+        let mut rounded = Vec::new();
+        tessellate(&straight(100.0), &[0], paint(round), &mut rounded);
+
+        // 丸めたぶんだけ広がる。半円 2 つ × 5 本ぶん。
+        assert!(
+            area(&rounded) > area(&square_ends) + 300.0,
+            "丸めても広がっていない（{:.1} と {:.1}）",
+            area(&rounded),
+            area(&square_ends),
+        );
+    }
+
+    // --- 実際に三角形にする ---
+
+    #[test]
+    fn a_dashed_stroke_makes_less_ink_than_a_solid_one() {
+        let outline = straight(100.0);
+
+        let mut solid = Vec::new();
+        tessellate(&outline, &[0], PaintType::stroke(4.0), &mut solid);
+
+        let mut dashed = Vec::new();
+        tessellate(
+            &outline,
+            &[0],
+            PaintType::dashed(4.0, Dash::new(10.0, 10.0)),
+            &mut dashed,
+        );
+
+        assert!(!dashed.is_empty(), "破線が消えている");
+        assert!(
+            area(&dashed) < area(&solid) * 0.6,
+            "塗られた面積が減っていない（{} / {}）",
+            area(&dashed),
+            area(&solid),
+        );
+    }
+
+    #[test]
+    fn a_dashed_stroke_covers_the_dashes_and_skips_the_gaps() {
+        let mut triangles = Vec::new();
+        tessellate(
+            &straight(100.0),
+            &[0],
+            // 2 点の線は `strip` を立てないと往復する。往復すると
+            // 帰りの破線が行きの隙間を埋めてしまう。
+            PaintType::Stroke {
+                line_width: 4.0,
+                joint_type: JointType::Miter,
+                strip: true,
+                dash: Some(Dash::new(10.0, 10.0)),
+            },
+            &mut triangles,
+        );
+
+        // 描くところの真ん中と、空けるところの真ん中。
+        assert!(contains(&triangles, 5.0, 0.0), "1 本目の上");
+        assert!(!contains(&triangles, 15.0, 0.0), "空けたところに線がある");
+        assert!(contains(&triangles, 25.0, 0.0), "2 本目の上");
+        assert!(!contains(&triangles, 35.0, 0.0), "空けたところに線がある");
     }
 }

@@ -18,6 +18,8 @@ gueiz-sound = { path = "crates/gueiz-sound" }
 gueiz-window = { path = "crates/gueiz-window" }
 log = "0.4.32"
 pollster = "1.0.1"
+rand = "0.10.3"
 raw-window-handle = "0.6.2"
+typesafe_builder = "1.6.0"
 wgpu = "30.0.1"
 winit = "0.31.0-beta.2"

@@ -5,8 +5,9 @@ use std::ops::{Deref, DerefMut, Range};
 use crate::camera::Camera;
 use crate::effect::{Block, EffectStack, EffectStage};
 use crate::math::Mat4;
-use crate::object::instance::Instance;
+use crate::instance::Instance;
 use crate::paint_type::{JointType, PaintType};
+use crate::post::{PostChain, PostEffect};
 use crate::atlas::TextureRegion;
 use crate::sprite::WHOLE_LAYER;
 use crate::tessellate;
@@ -41,7 +42,7 @@ pub struct Object {
     outline: Vec<Vertex>,
     /// 各輪郭が `outline` のどこから始まるか。先頭は外周、以降は穴。
     contour_starts: Vec<usize>,
-    /// 三角形に開いた結果。[`crate::object::draw_manager::DrawManager`] が読む。
+    /// 三角形に開いた結果。[`crate::draw_manager::DrawManager`] が読む。
     triangles: Vec<Vertex>,
     recording: bool,
     /// 形が変わったので積み直しが要る。
@@ -56,6 +57,10 @@ pub struct Object {
     outline_changed: bool,
 
     camera: Camera,
+    /// どの層で描くか。層ごとに別のエフェクトを掛けられる。
+    layer: u32,
+    /// この図形だけに掛ける、画面全体のたぐいのエフェクト。
+    post_chain: PostChain,
     translation: [f32; 3],
     scale: [f32; 3],
     rotation: [f32; 3],
@@ -84,6 +89,8 @@ impl Object {
             edit_depth: 0,
             outline_changed: false,
             camera: Camera::default(),
+            layer: 0,
+            post_chain: PostChain::new(),
             translation: [0.0; 3],
             scale: [1.0; 3],
             rotation: [0.0; 3],
@@ -181,6 +188,85 @@ impl Object {
     pub fn camera(&mut self, camera: Camera) -> &mut Self {
         self.camera = camera;
         self
+    }
+
+    /// いま写しているカメラ。
+    pub fn view_camera(&self) -> &Camera {
+        &self.camera
+    }
+
+    /// どの層で描くか。**層ごとに別のエフェクトを掛けられます。**
+    ///
+    /// 画面全体のエフェクト（ぼかしなど）は、隣の画素を読むので図形ごとには
+    /// 掛けられません。そこで**同じ扱いをしたい図形をまとめて 1 枚に描き**、
+    /// その 1 枚に掛けてから重ねます。層はそのまとまりです。
+    ///
+    /// 番号の小さい層から順に描き、後の層が上に乗ります。
+    /// **同じ層の図形どうしは滲み合います。** 分けたいなら層を分けてください。
+    ///
+    /// 層の中の前後は今までどおり [`Object::z`] で決まります。
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::object::Object;
+    /// # fn run(background: &mut Object, glass: &mut Object) {
+    /// background.layer(0);
+    /// glass.layer(1);   // こちらだけぼかす、といった使い方
+    /// # }
+    /// ```
+    pub fn layer(&mut self, layer: u32) -> &mut Self {
+        self.layer = layer;
+        self
+    }
+
+    /// いまいる層。
+    pub fn in_layer(&self) -> u32 {
+        self.layer
+    }
+
+    /// **この図形だけに掛ける**、画面全体のたぐいのエフェクト。
+    ///
+    /// ぼかしのように隣の画素を読むものは、断片シェーダでは図形ごとに書けません。
+    /// そこで**同じエフェクトが続く図形をまとめて 1 枚に描き**、その 1 枚に
+    /// 掛けてから重ねます。まとめる仕事はこちらでやるので、指定は図形ごとで済みます。
+    ///
+    /// # 描く回数
+    ///
+    /// **エフェクトが変わるたびにパスが分かれます。** 描く順（層 → z）に並べて、
+    /// 同じエフェクトが続くあいだは 1 回で描きます。つまり
+    ///
+    /// - 全部に同じものを掛ける → 1 回
+    /// - 3 つの図形にだけ掛ける（z が隣どうし）→ 2 回
+    /// - 掛けた図形と掛けない図形が交互 → その数だけ
+    ///
+    /// 交互になるのが困るなら、[`Object::layer`] でまとめてください。
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::object::Object;
+    /// # use gueiz_2d::post::PostEffect;
+    /// # fn run(card: &mut Object) {
+    /// card.post_effect(PostEffect::Blur { radius: 6.0 });
+    /// # }
+    /// ```
+    pub fn post_effect(&mut self, effect: PostEffect) -> &mut Self {
+        self.post_chain.push(effect);
+        self
+    }
+
+    /// 掛けるものをまとめて差し替える。
+    pub fn set_post_chain(&mut self, post_chain: PostChain) -> &mut Self {
+        self.post_chain = post_chain;
+        self
+    }
+
+    /// 掛けるものを全部外す。
+    pub fn clear_post_effects(&mut self) -> &mut Self {
+        self.post_chain = PostChain::new();
+        self
+    }
+
+    /// いま掛かっているもの。
+    pub fn post_chain(&self) -> &PostChain {
+        &self.post_chain
     }
 
     pub fn translate(&mut self, x: f32, y: f32, z: f32) -> &mut Self {
@@ -579,7 +665,107 @@ impl Object {
             .multiply(instance.transform())
     }
 
-    /// 三角形に開いた頂点列。
+    // --- 当たり判定 ---
+
+    /// 点が図形の中にあるか。**図形のローカル座標で。**
+    ///
+    /// 置き場所（[`Object::translate`]）も拡大も回転も**見ません**。
+    /// 頂点を置いたときと同じ座標で聞きます。
+    ///
+    /// 変換や複製まで込みで判定するなら [`Object::hit`]。
+    ///
+    /// 判定は[開いた三角形](Object::triangles)に対して行うので、
+    /// **見えているとおりに当たります**（線なら帯の上、穴は外）。
+    /// 詳しくは [`crate::tessellate::contains`]。
+    ///
+    /// ```
+    /// # use gueiz_2d::object;
+    /// # use gueiz_2d::paint_type::PaintType;
+    /// # use gueiz_2d::vertex::Vertex;
+    /// let mut square = object::create_object("Square");
+    /// square.begin(PaintType::Fill);
+    /// for (x, y) in [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)] {
+    ///     square.put_vertex(Vertex::new_position_color(x, y, 0.0, 1.0, 1.0, 1.0, 1.0));
+    /// }
+    /// square.end();
+    ///
+    /// assert!(square.contains(5.0, 5.0));
+    /// assert!(!square.contains(-1.0, 5.0));
+    /// ```
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        tessellate::contains(&self.triangles, x, y)
+    }
+
+    /// 点がどの複製に当たっているか。**カメラに渡すのと同じ座標で。**
+    ///
+    /// 図形の変換と複製の変換をどちらも通して判定し、当たった複製の番号を返します。
+    /// 重なっていれば**後ろの複製が勝ちます**（後から置いたものが手前に描かれるため）。
+    ///
+    /// # どの座標で聞くか
+    ///
+    /// カメラに入れる前の座標（ふつうはピクセル）です。マウスの位置から
+    /// 引くときは、先に [`Camera::screen_to_world`] を通してください。
+    /// **[`crate::camera::ScaleMode`] を相対にすると画素位置と座標がずれます。**
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::camera::Camera;
+    /// # use gueiz_2d::object::Object;
+    /// # fn run(camera: &Camera, button: &Object, mouse: [f32; 2]) {
+    /// let [x, y] = camera.screen_to_world(mouse[0], mouse[1]).expect("戻せる");
+    ///
+    /// if let Some(index) = button.hit(x, y) {
+    ///     println!("{index} 番目が押された");
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// # 速さ
+    ///
+    /// **複製の数 x 三角形の数**に比例します。押した瞬間だけなら問題になりませんが、
+    /// 毎フレーム数千の複製を当てるなら、先に大まかな枠で絞ってください。
+    ///
+    /// 平面の変換（移動・回転 z・拡大）でない複製は、戻せないので飛ばします。
+    pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
+        let object = self.transform();
+
+        // 手前から見る。重なっていたら手前が勝つ。
+        (0..self.instances.len()).rev().find(|index| {
+            let combined = object.multiply(self.instances[*index].transform());
+
+            // 点のほうを図形の座標へ戻す。三角形を全部動かすより軽い。
+            match combined.inverse_2d() {
+                Some(back) => {
+                    let [local_x, local_y, _] = back.transform_point(x, y, 0.0);
+                    self.contains(local_x, local_y)
+                }
+
+                // 潰れた変換。どこにも当たらないものとして扱う。
+                None => false,
+            }
+        })
+    }
+
+    /// 複製を 1 つだけ指して判定する。
+    ///
+    /// どれに当たったかがすでに分かっているときに。番号が無ければ `false`。
+    pub fn hit_instance(&self, index: usize, x: f32, y: f32) -> bool {
+        let Some(instance) = self.instances.get(index) else {
+            return false;
+        };
+
+        let Some(back) = self.transform().multiply(instance.transform()).inverse_2d() else {
+            return false;
+        };
+
+        let [local_x, local_y, _] = back.transform_point(x, y, 0.0);
+
+        self.contains(local_x, local_y)
+    }
+
+    /// 三角形に開いた頂点列。3 つずつで 1 枚。
+    ///
+    /// 輪郭ではなく**開いたあと**なので、穴も塗り分けも織り込み済みです。
+    /// [`PaintType::Stroke`] なら線の帯そのものが入っています。
     pub fn triangles(&self) -> &[Vertex] {
         &self.triangles
     }
@@ -625,38 +811,38 @@ impl Object {
 
     /// Shape 段の 1 山ぶんの形を三角形に足す。
     fn apply_shape_block(&mut self, block: Block) {
-        match block {
-            Block::Outline { width, color } => {
-                if width <= 0.0 {
-                    return;
-                }
+        // Shape 段にいるのは今のところ Outline だけ。他の段の山は素通しにする。
+        let Block::Outline { width, color } = block else {
+            return;
+        };
 
-                // 輪郭ごとに線を引く。穴の縁にも付く。
-                let outline: Vec<Vertex> = self
-                    .outline
-                    .iter()
-                    .map(|vertex| {
-                        let mut tinted = *vertex;
-                        [tinted.r, tinted.g, tinted.b, tinted.a] = color;
-                        tinted
-                    })
-                    .collect();
-
-                tessellate::tessellate(
-                    &outline,
-                    &self.contour_starts,
-                    PaintType::Stroke {
-                        line_width: width,
-                        joint_type: JointType::Miter,
-                        strip: false,
-                    },
-                    &mut self.triangles,
-                );
-            }
-
-            // 他の段の山はここでは何もしない。
-            _ => {}
+        if width <= 0.0 {
+            return;
         }
+
+        // 輪郭ごとに線を引く。穴の縁にも付く。
+        let outline: Vec<Vertex> = self
+            .outline
+            .iter()
+            .map(|vertex| {
+                let mut tinted = *vertex;
+                [tinted.r, tinted.g, tinted.b, tinted.a] = color;
+                tinted
+            })
+            .collect();
+
+        tessellate::tessellate(
+            &outline,
+            &self.contour_starts,
+            PaintType::Stroke {
+                line_width: width,
+                joint_type: JointType::Miter,
+                strip: false,
+                // 縁取りは 1 本につなぐ。刻みたいなら図形そのものの塗り方で。
+                dash: None,
+            },
+            &mut self.triangles,
+        );
     }
 }
 
@@ -727,6 +913,19 @@ mod tests {
         Vertex::new_position_color(x, y, 0.0, 1.0, 1.0, 1.0, 1.0)
     }
 
+    /// 原点から `side` の四角。当たり判定を試すのに使う。
+    fn square(side: f32) -> Object {
+        let mut object = create_object("Square");
+        object.begin(PaintType::Fill);
+
+        for (x, y) in [(0.0, 0.0), (side, 0.0), (side, side), (0.0, side)] {
+            object.put_vertex(point(x, y));
+        }
+
+        object.end();
+        object
+    }
+
     #[test]
     fn a_triangle_becomes_one_triangle() {
         let mut object = create_object("Triangle");
@@ -761,6 +960,7 @@ mod tests {
             line_width: 4.0,
             joint_type: JointType::Bevel,
             strip: false,
+            dash: None,
         };
 
         let mut object = create_object("Outline");
@@ -1333,5 +1533,142 @@ mod tests {
         let [x, y, _] = transform.transform_point(0.0, 0.0, 0.0);
         assert!(x.abs() < 1e-6, "x was {x}");
         assert!(y.abs() < 1e-6, "y was {y}");
+    }
+
+    // --- 当たり判定 ---
+
+    /// ローカルは変換を見ない。置き場所を動かしても結果は変わらない。
+    #[test]
+    fn the_local_test_ignores_the_transform() {
+        let mut object = square(10.0);
+        object.translate(1000.0, 1000.0, 0.0);
+
+        assert!(object.contains(5.0, 5.0), "ローカルでは真ん中のまま");
+        assert!(!object.contains(1005.0, 1005.0), "動かした先では当たらない");
+    }
+
+    /// 複製が無ければ、どこを聞いても当たらない。
+    /// 置かれていないものに当たっては困る。
+    #[test]
+    fn a_shape_with_no_instances_is_never_hit() {
+        let object = square(10.0);
+
+        assert_eq!(object.hit(5.0, 5.0), None);
+    }
+
+    /// 動かしたぶんだけ、当たる場所も動く。
+    #[test]
+    fn moving_the_shape_moves_where_it_is_hit() {
+        let mut object = square(10.0);
+        object.instance(Instance::new().translate(100.0, 50.0, 0.0));
+
+        assert_eq!(object.hit(105.0, 55.0), Some(0));
+        assert_eq!(object.hit(5.0, 5.0), None, "元の場所には無い");
+    }
+
+    /// 拡大したぶんだけ、当たる範囲も広がる。
+    #[test]
+    fn scaling_the_shape_widens_where_it_is_hit() {
+        let mut object = square(10.0);
+        object.instance(Instance::new().scale(4.0, 4.0, 1.0));
+
+        assert_eq!(object.hit(35.0, 35.0), Some(0), "4 倍なら 40 まで届く");
+        assert_eq!(object.hit(45.0, 35.0), None);
+    }
+
+    /// 図形の変換と複製の変換が両方掛かる。片方だけだと場所がずれる。
+    #[test]
+    fn both_transforms_are_applied() {
+        let mut object = square(10.0);
+        object.translate(100.0, 0.0, 0.0);
+        object.instance(Instance::new().translate(0.0, 50.0, 0.0));
+
+        assert_eq!(object.hit(105.0, 55.0), Some(0));
+        assert_eq!(object.hit(5.0, 55.0), None, "図形のぶんが抜けている");
+        assert_eq!(object.hit(105.0, 5.0), None, "複製のぶんが抜けている");
+    }
+
+    /// 回しても当たる。四角を 90 度回して、角の行き先を見る。
+    #[test]
+    fn rotating_the_shape_turns_where_it_is_hit() {
+        let mut object = square(10.0);
+        object.instance(
+            Instance::new().rotate(0.0, 0.0, std::f32::consts::FRAC_PI_2),
+        );
+
+        // (1, 1) は 90 度回って (-1, 1) のあたりへ移る。
+        assert_eq!(object.hit(-1.0, 1.0), Some(0));
+        assert_eq!(object.hit(1.0, 1.0), None, "回す前の場所には無い");
+    }
+
+    /// 複製ごとに別々に当たる。どれに当たったかが返ること。
+    #[test]
+    fn each_instance_is_hit_separately() {
+        let mut object = square(10.0);
+        object.instance(Instance::new().translate(0.0, 0.0, 0.0));
+        object.instance(Instance::new().translate(100.0, 0.0, 0.0));
+        object.instance(Instance::new().translate(200.0, 0.0, 0.0));
+
+        assert_eq!(object.hit(5.0, 5.0), Some(0));
+        assert_eq!(object.hit(105.0, 5.0), Some(1));
+        assert_eq!(object.hit(205.0, 5.0), Some(2));
+        assert_eq!(object.hit(305.0, 5.0), None);
+    }
+
+    /// 重なったら**手前**が勝つ。後から置いたものが手前に描かれるので、
+    /// 見えているほうを返さないと、押した先と反応がずれる。
+    #[test]
+    fn the_front_instance_wins_when_they_overlap() {
+        let mut object = square(10.0);
+        object.instance(Instance::new().translate(0.0, 0.0, 0.0));
+        object.instance(Instance::new().translate(5.0, 0.0, 0.0));
+
+        // 5..10 は両方が覆っている。
+        assert_eq!(object.hit(7.0, 5.0), Some(1), "後から置いたほうのはず");
+        assert_eq!(object.hit(2.0, 5.0), Some(0), "重なっていないところ");
+    }
+
+    /// 番号を指して聞ける。知らない番号なら当たらない。
+    #[test]
+    fn a_single_instance_can_be_asked_directly() {
+        let mut object = square(10.0);
+        object.instance(Instance::new().translate(0.0, 0.0, 0.0));
+        object.instance(Instance::new().translate(100.0, 0.0, 0.0));
+
+        assert!(object.hit_instance(1, 105.0, 5.0));
+        assert!(!object.hit_instance(0, 105.0, 5.0), "別の複製には当たらない");
+        assert!(!object.hit_instance(9, 105.0, 5.0), "居ない番号");
+    }
+
+    /// 潰れた複製（拡大 0）は当たらない。戻せないので飛ばす。
+    /// 落ちないことも見る。
+    #[test]
+    fn a_collapsed_instance_is_skipped() {
+        let mut object = square(10.0);
+        object.instance(Instance::new().scale(0.0, 0.0, 1.0));
+
+        assert_eq!(object.hit(0.0, 0.0), None);
+    }
+
+    /// 線は帯の上だけ。囲まれた真ん中は押しても反応しない。
+    #[test]
+    fn a_stroked_shape_is_only_hit_on_its_line() {
+        let mut object = create_object("Ring");
+        object.begin(PaintType::Stroke {
+            line_width: 4.0,
+            joint_type: JointType::Miter,
+            strip: false,
+            dash: None,
+        });
+
+        for (x, y) in [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)] {
+            object.put_vertex(point(x, y));
+        }
+
+        object.end();
+        object.instance(Instance::new());
+
+        assert_eq!(object.hit(0.0, 20.0), Some(0), "線の上");
+        assert_eq!(object.hit(20.0, 20.0), None, "真ん中は塗っていない");
     }
 }

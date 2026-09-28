@@ -232,6 +232,53 @@ impl Mat4 {
         ]
     }
 
+    /// 平面の変換だけを逆に解く。写した点を元の座標へ戻すのに使う。
+    ///
+    /// # 何を逆にするのか
+    ///
+    /// 2D で効くのは**左上の 2x2 と平行移動**だけです（z は捨てられる）。
+    /// なので一般の 4x4 の逆行列ではなく、その部分だけを解きます。
+    /// 短いぶん速く、桁落ちも少なく済みます。
+    ///
+    /// 潰れていて戻せない（行列式がほぼ 0、遠近投影など）と `None`。
+    ///
+    /// ```
+    /// # use gueiz_gpu::math::Mat4;
+    /// let forward = Mat4::from_translation(10.0, 20.0, 0.0)
+    ///     .multiply(Mat4::from_scale(2.0, 4.0, 1.0));
+    /// let back = forward.inverse_2d().expect("戻せる");
+    ///
+    /// let [x, y, _] = back.transform_point(30.0, 60.0, 0.0);
+    ///
+    /// assert!((x - 10.0).abs() < 1e-5 && (y - 10.0).abs() < 1e-5);
+    /// ```
+    pub fn inverse_2d(self) -> Option<Self> {
+        let columns = self.columns;
+
+        let (a, b) = (columns[0][0], columns[0][1]);
+        let (c, d) = (columns[1][0], columns[1][1]);
+        let (tx, ty) = (columns[3][0], columns[3][1]);
+
+        let determinant = a * d - b * c;
+
+        if determinant.abs() < f32::EPSILON {
+            return None;
+        }
+
+        // 2x2 の逆行列。平行移動は、回して縮めてから引く。
+        let (ia, ib) = (d / determinant, -b / determinant);
+        let (ic, id) = (-c / determinant, a / determinant);
+
+        Some(Self {
+            columns: [
+                [ia, ib, 0.0, 0.0],
+                [ic, id, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [-(ia * tx + ic * ty), -(ib * tx + id * ty), 0.0, 1.0],
+            ],
+        })
+    }
+
     pub fn transform_point(self, x: f32, y: f32, z: f32) -> [f32; 3] {
         let mut result = [0.0; 3];
 

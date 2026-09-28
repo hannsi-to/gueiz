@@ -495,6 +495,80 @@ impl Renderer {
         self.render(clear_color, |_render_pass| {})
     }
 
+    /// パスを自分で組む。**層ごとに別のエフェクトを掛けたいときの口です。**
+    ///
+    /// フレームの取得と提出だけ引き受けて、あいだは呼ぶ側に任せます。
+    /// その代わり、この道では**画面全体のエフェクト
+    /// （[`Renderer::edit_post_chain`]）も MSAA も効きません。**
+    /// どちらも要るなら自分で組み込んでください。
+    ///
+    /// ```no_run
+    /// # use gueiz_gpu::post::PostChain;
+    /// # use gueiz_gpu::renderer::Renderer;
+    /// # fn run(renderer: &mut Renderer, chains: &[PostChain]) {
+    /// renderer.render_passes(|frame| {
+    ///     for (layer, chain) in chains.iter().enumerate() {
+    ///         let scene = frame
+    ///             .post_processor
+    ///             .scene_view(frame.device, frame.width, frame.height, frame.format)
+    ///             .clone();
+    ///
+    ///         // 層ごとに透明で消してから描く。
+    ///         // ... frame.encoder で scene へ描くパスを組む ...
+    ///         let _ = (&scene, layer);
+    ///
+    ///         frame
+    ///             .post_processor
+    ///             .run_over(frame.queue, frame.encoder, chain, frame.target);
+    ///     }
+    /// });
+    /// # }
+    /// ```
+    pub fn render_passes(&mut self, frame: impl FnOnce(&mut FramePasses<'_>)) -> FrameOutcome {
+        let Some(render_surface) = self.render_surface.as_mut() else {
+            return FrameOutcome::NoSurface;
+        };
+
+        let Some(surface_frame) = render_surface.acquire() else {
+            return FrameOutcome::Skipped;
+        };
+
+        let target = surface_frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder =
+            render_surface
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("gueiz frame"),
+                });
+
+        // 設定の枠を頭に戻す。層ごとに掛けるならこれが要る。
+        render_surface.post_processor.begin_frame();
+
+        {
+            let mut passes = FramePasses {
+                device: &render_surface.device,
+                queue: &render_surface.queue,
+                encoder: &mut encoder,
+                target: &target,
+                post_processor: &mut render_surface.post_processor,
+                width: render_surface.surface_configuration.width,
+                height: render_surface.surface_configuration.height,
+                format: render_surface.surface_configuration.format,
+            };
+
+            frame(&mut passes);
+        }
+
+        let submission_index = render_surface.queue.submit(Some(encoder.finish()));
+        render_surface.queue.present(surface_frame);
+        render_surface.last_submission_index = Some(submission_index);
+
+        FrameOutcome::Presented
+    }
+
     pub fn render(
         &mut self,
         clear_color: wgpu::Color,
@@ -504,24 +578,8 @@ impl Renderer {
             return FrameOutcome::NoSurface;
         };
 
-        let frame = match render_surface.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                render_surface.reconfigure();
-                frame
-            }
-
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                log::debug!("surface outdated or lost; reconfiguring");
-                render_surface.reconfigure();
-                return FrameOutcome::Skipped;
-            }
-
-            other => {
-                log::debug!("skipped a frame: {other:?}");
-                return FrameOutcome::Skipped;
-            }
+        let Some(frame) = render_surface.acquire() else {
+            return FrameOutcome::Skipped;
         };
 
         let surface_view = frame
@@ -601,7 +659,47 @@ struct RenderSurface {
     multisample: MultisampleTarget,
 }
 
+/// [`Renderer::render_passes`] が渡す、1 フレームぶんの材料。
+///
+/// パスの組み立ては呼ぶ側の仕事です。ここにあるのは、そのために要るものだけ。
+pub struct FramePasses<'a> {
+    pub device: &'a wgpu::Device,
+    pub queue: &'a wgpu::Queue,
+    /// ここにパスを積む。提出は [`Renderer::render_passes`] が引き受ける。
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// 最後に画面へ出る先。**消すのも呼ぶ側**です。
+    pub target: &'a wgpu::TextureView,
+    /// 層ごとにエフェクトを掛けるのに使う。枠は戻してある。
+    pub post_processor: &'a mut PostProcessor,
+    pub width: u32,
+    pub height: u32,
+    pub format: wgpu::TextureFormat,
+}
+
 impl RenderSurface {
+    /// 次のフレームを取る。取れなければ `None`。
+    fn acquire(&mut self) -> Option<wgpu::SurfaceTexture> {
+        match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => Some(frame),
+
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                self.reconfigure();
+                Some(frame)
+            }
+
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                log::debug!("surface outdated or lost; reconfiguring");
+                self.reconfigure();
+                None
+            }
+
+            other => {
+                log::debug!("skipped a frame: {other:?}");
+                None
+            }
+        }
+    }
+
     fn size(&self) -> SurfaceSize {
         SurfaceSize::new(
             self.surface_configuration.width,

@@ -46,8 +46,8 @@ use crate::camera::Camera;
 use crate::error::Gueiz2DError;
 use crate::font::{DEFAULT_TOLERANCE, Font};
 use crate::format::{Formatted, LineDecoration, ResetTarget, Shadow, TextFormat, Token};
-use crate::object::draw_manager::DrawManager;
-use crate::object::{self, instance};
+use crate::draw_manager::DrawManager;
+use crate::{instance, object};
 use crate::paint_type::PaintType;
 use crate::vertex::Vertex;
 
@@ -853,22 +853,13 @@ impl<'a, M: Metrics> LayoutContext<'a, M> {
 
         let size = self.size();
 
-        // 送り幅は**元のグリフ**で決める。出鱈目な字に置き換えても
-        // 並びが動かないのは、ここで元のほうを見ているから。
-        if let Some(left) = self.previous.filter(|_| self.style.kerning) {
-            self.pen_x += self.font.kerning(left, glyph) * size;
-        }
+        // 置くときも測るときも同じ式を通す。折り返しがずれないのはこのため。
+        let step = step_of(self.font, self.style, self.state(), self.previous, glyph);
+        let advance = step.advance;
+
+        self.pen_x += step.kern;
 
         self.sync_decorations(out);
-
-        // 字間は書式が指定していればそちらが勝つ。積むのではなく置き換える。
-        let spacing = self.state().space_x.unwrap_or(self.style.letter_spacing);
-        let mut advance = self.font.advance(glyph) * size + spacing;
-
-        if self.state().bold {
-            // 太らせたぶんだけ広げないと、字がくっつく。
-            advance += self.style.bold_weight * size;
-        }
 
         let drawn = if self.state().obfuscated {
             self.scramble(glyph, index)
@@ -1293,7 +1284,7 @@ impl TextRenderer {
     ///
     /// ```no_run
     /// # use gueiz_2d::font::Font;
-    /// # use gueiz_2d::object::DrawManager;
+    /// # use gueiz_2d::draw_manager::DrawManager;
     /// # use gueiz_2d::text::{TextRenderer, TextStyle};
     /// # fn run(font: &Font, draw_manager: &mut DrawManager) -> Result<(), gueiz_2d::error::Gueiz2DError> {
     /// let mut text = TextRenderer::new();
@@ -1319,7 +1310,7 @@ impl TextRenderer {
     /// ```no_run
     /// # use gueiz_2d::font::Font;
     /// # use gueiz_2d::format::Formatted;
-    /// # use gueiz_2d::object::DrawManager;
+    /// # use gueiz_2d::draw_manager::DrawManager;
     /// # use gueiz_2d::text::{TextRenderer, TextStyle};
     /// # fn run(font: &Font, draw_manager: &mut DrawManager) -> Result<(), Box<dyn std::error::Error>> {
     /// let formatted = Formatted::parse("§[gold]§[bold]勝利§[/]§[ln]§[underline]次へ")?;
@@ -1646,8 +1637,7 @@ impl TextRenderer {
 
         // 名前は形の鍵から組む。登録先は名前をひとつに保つので、
         // ここで重ねると付け替えられて、当てにできなくなる。
-        let mut object =
-            object::create_object(&format!("Glyph {} skew{} {:?}", glyph.0, skew, layer));
+        let mut object = object::create_object(&format!("Glyph {} skew{} {:?}", glyph.0, skew, layer));
 
         let skew = skew as f32 / SKEW_STEPS;
         object.begin(PaintType::Fill);
@@ -1752,6 +1742,416 @@ impl TextRenderer {
 /// 傾きを形の鍵に使える整数に丸める。
 fn quantize_skew(italic: f32) -> i32 {
     (italic * SKEW_STEPS).round() as i32
+}
+
+// --- 折り返し ---
+
+/// どこで折るか。
+///
+/// 日本語は語の切れ目に空白が無いので、**字と字のあいだで折ります**。
+/// そのままだと行頭に「、」が来たりするので、禁則も見ています。
+#[derive(Clone, Copy)]
+#[derive(Eq, PartialEq)]
+#[derive(Debug, Default)]
+pub enum WrapMode {
+    /// 語の切れ目でだけ折る。1 語で幅を超えるときは、**そのままはみ出す**。
+    Word,
+    /// 語の切れ目で折る。1 語で幅を超えるときだけ、語の途中でも折る。
+    ///
+    /// 幅からはみ出さないので、箱に収めたいときはこれ。
+    #[default]
+    WordOrCharacter,
+    /// 字と字のあいだならどこでも折る。禁則も見ない。
+    Character,
+}
+
+/// 幅に収まるよう、改行を差し込んだ文字列を返す。
+///
+/// **並べ直しはしません。** 元のトークン列を切って
+/// [`TextFormat::NewLine`] を挟むだけなので、返ったものを
+/// [`layout_formatted`] に渡せば折り返した結果になります。
+/// 字は借りたままで、写しは作りません。
+///
+/// 幅は**送り幅**で測ります。斜体・影・縁取りははみ出すので、
+/// きっちり収めたいなら少し狭めに渡してください。
+///
+/// ```no_run
+/// # use gueiz_2d::font::Font;
+/// # use gueiz_2d::format::Formatted;
+/// # use gueiz_2d::text::{layout_formatted, wrap, TextStyle, WrapMode};
+/// # fn run(font: &Font) -> Result<(), Box<dyn std::error::Error>> {
+/// let formatted = Formatted::parse("§[red]長い文章§[reset]でも折り返します")?;
+/// let style = TextStyle::new(24.0);
+///
+/// let folded = wrap(font, &formatted, &style, 200.0, WrapMode::WordOrCharacter);
+/// let layout = layout_formatted(font, &folded, &style);
+///
+/// assert!(layout.width <= 200.0);
+/// # Ok(())
+/// # }
+/// ```
+pub fn wrap<'a>(
+    font: &Font,
+    formatted: &Formatted<'a>,
+    style: &TextStyle,
+    max_width: f32,
+    mode: WrapMode,
+) -> Formatted<'a> {
+    wrap_with(font, formatted, style, max_width, mode)
+}
+
+/// 幅に収めて並べる。書式は読まない。
+///
+/// ```no_run
+/// # use gueiz_2d::font::Font;
+/// # use gueiz_2d::text::{layout_wrapped, TextStyle};
+/// # fn run(font: &Font) {
+/// let layout = layout_wrapped(font, "折り返したい長い文章", &TextStyle::new(24.0), 200.0);
+///
+/// println!("{} 行になりました", layout.rows.len());
+/// # }
+/// ```
+pub fn layout_wrapped(font: &Font, text: &str, style: &TextStyle, max_width: f32) -> TextLayout {
+    let formatted = Formatted::plain(text);
+    let folded = wrap(font, &formatted, style, max_width, WrapMode::default());
+
+    layout_formatted(font, &folded, style)
+}
+
+/// 幅に収めたときの大きさ。**GPU は触らない。**
+pub fn measure_wrapped(font: &Font, text: &str, style: &TextStyle, max_width: f32) -> TextSize {
+    layout_wrapped(font, text, style, max_width).size()
+}
+
+/// 1 字ぶんの送り。置くときと測るときで**同じ式を通す**ための形。
+#[derive(Clone, Copy)]
+struct Step {
+    /// 直前の字との詰め。
+    kern: f32,
+    /// 次の字までの送り幅。
+    advance: f32,
+}
+
+impl Step {
+    fn total(self) -> f32 {
+        self.kern + self.advance
+    }
+}
+
+/// その字を置いたとき、ペンがどれだけ進むか。
+fn step_of<M: Metrics>(
+    font: &M,
+    style: &TextStyle,
+    state: &FormatState,
+    previous: Option<GlyphId>,
+    glyph: GlyphId,
+) -> Step {
+    let size = state.size.unwrap_or(style.size);
+
+    // 送り幅は**元のグリフ**で決める。出鱈目な字に置き換えても並びが動かない。
+    let kern = previous
+        .filter(|_| style.kerning)
+        .map_or(0.0, |left| font.kerning(left, glyph) * size);
+
+    // 字間は書式が指定していればそちらが勝つ。積むのではなく置き換える。
+    let spacing = state.space_x.unwrap_or(style.letter_spacing);
+    let mut advance = font.advance(glyph) * size + spacing;
+
+    if state.bold {
+        // 太らせたぶんだけ広げないと、字がくっつく。
+        advance += style.bold_weight * size;
+    }
+
+    Step { kern, advance }
+}
+
+fn wrap_with<'a, M: Metrics>(
+    font: &M,
+    formatted: &Formatted<'a>,
+    style: &TextStyle,
+    max_width: f32,
+    mode: WrapMode,
+) -> Formatted<'a> {
+    // 幅が決まらないなら折らない。
+    if !(max_width.is_finite() && max_width > 0.0) {
+        return formatted.clone();
+    }
+
+    let mut folder = Folder {
+        out: Vec::new(),
+        formats: FormatStack::default(),
+        mode,
+        max_width,
+        pen: 0.0,
+        previous: None,
+        candidate: None,
+        pen_at_candidate: 0.0,
+        first_kern: 0.0,
+    };
+
+    for token in formatted.tokens() {
+        match token {
+            Token::Format(format) => folder.format(*format),
+            Token::Text(text) => folder.text(font, style, text),
+        }
+    }
+
+    Formatted::from_tokens(folder.out)
+}
+
+/// 折り返しの途中の状態。
+struct Folder<'a> {
+    /// 差し込みながら組み立てる新しいトークン列。
+    out: Vec<Token<'a>>,
+    formats: FormatStack,
+    mode: WrapMode,
+    max_width: f32,
+
+    /// いまの行で進んだ幅。
+    pen: f32,
+    previous: Option<GlyphId>,
+
+    /// 折ってよい場所。`out` の何番目に改行を挟むか。
+    candidate: Option<usize>,
+    /// その場所までに進んでいた幅。
+    pen_at_candidate: f32,
+    /// 折り返し候補のすぐあとに掛かった詰め。
+    ///
+    /// そこで折ると前の行の字とは隣り合わなくなるので、引き算で戻す。
+    first_kern: f32,
+}
+
+impl<'a> Folder<'a> {
+    fn format(&mut self, format: TextFormat) {
+        self.out.push(Token::Format(format));
+
+        if self.formats.apply(format) {
+            self.start_row();
+        }
+    }
+
+    fn text<M: Metrics>(&mut self, font: &M, style: &TextStyle, text: &'a str) {
+        // このトークンのうち、まだ `out` に出していない先頭。
+        let mut start = 0;
+
+        for (offset, character) in text.char_indices() {
+            if character == '\n' {
+                self.start_row();
+                continue;
+            }
+
+            let Some(glyph) = font.glyph(character) else {
+                // 持っていない文字は詰めずに飛ばす。
+                self.previous = None;
+                continue;
+            };
+
+            let step = step_of(font, style, &self.formats.state, self.previous, glyph);
+
+            // 行頭で折っても空行が増えるだけなので、1 字は必ず置く。
+            if self.pen > 0.0 && self.pen + step.total() > self.max_width {
+                self.fold(text, &mut start, offset);
+            }
+
+            if self.candidate.is_some() && self.first_kern == 0.0 {
+                self.first_kern = step.kern;
+            }
+
+            self.pen += step.total();
+            self.previous = Some(glyph);
+
+            // 次の字との境目が折れるなら、ここを覚えておく。
+            let next = text[offset + character.len_utf8()..].chars().next();
+
+            if let Some(next) = next
+                && self.breakable(character, next)
+            {
+                self.mark(text, &mut start, offset + character.len_utf8());
+            }
+        }
+
+        self.flush(text, start, text.len());
+    }
+
+    /// 折れる場所かどうか。
+    fn breakable(&self, left: char, right: char) -> bool {
+        if self.mode == WrapMode::Character {
+            return true;
+        }
+
+        // 空白のうしろはいつでも折れる。空白は前の行の末尾に残す。
+        if is_space(left) {
+            return true;
+        }
+
+        // 英字どうしは空白でしか折らない。
+        if !is_cjk(left) && !is_cjk(right) {
+            return false;
+        }
+
+        // 行頭に置けない字、行末に置けない字。
+        !starts_forbidden(right) && !ends_forbidden(left)
+    }
+
+    /// ここで折れる、と覚える。境目までを 1 つのトークンとして出しておく。
+    fn mark(&mut self, text: &'a str, start: &mut usize, at: usize) {
+        self.flush(text, *start, at);
+        *start = at;
+
+        self.candidate = Some(self.out.len());
+        self.pen_at_candidate = self.pen;
+        self.first_kern = 0.0;
+    }
+
+    /// 幅を超えたので折る。
+    fn fold(&mut self, text: &'a str, start: &mut usize, at: usize) {
+        if let Some(index) = self.candidate.take() {
+            // 覚えておいた境目まで戻して、そこに改行を挟む。
+            // 動かした語のぶんだけ、新しい行にペンを引き継ぐ。
+            self.drop_trailing_space(index);
+            self.out.insert(index, Token::Format(TextFormat::NewLine));
+
+            self.pen -= self.pen_at_candidate + self.first_kern;
+            self.first_kern = 0.0;
+            return;
+        }
+
+        // 折れる境目が無い。`Word` なら諦めてはみ出させる。
+        if self.mode == WrapMode::Word {
+            return;
+        }
+
+        // 語の途中でも折る。ここまでを出してから改行を挟む。
+        self.flush(text, *start, at);
+        *start = at;
+
+        self.out.push(Token::Format(TextFormat::NewLine));
+        self.start_row();
+    }
+
+    /// 折った所に残る行末の空白を落とす。
+    ///
+    /// **幅に数えられてしまうため。** 「aaa 」で折ると、見えない空白のぶん
+    /// 行が頼まれた幅より広くなります。空白で折ったのだから、
+    /// その空白は境目そのものであって、どちらの行の中身でもありません。
+    fn drop_trailing_space(&mut self, index: usize) {
+        let Some(previous) = index.checked_sub(1) else {
+            return;
+        };
+
+        let Some(Token::Text(text)) = self.out.get(previous) else {
+            return;
+        };
+
+        // 借りている字を切るだけ。写しは作らない。
+        self.out[previous] = Token::Text(text.trim_end_matches(is_space));
+    }
+
+    /// 行を改める。
+    fn start_row(&mut self) {
+        self.pen = 0.0;
+        self.previous = None;
+        self.candidate = None;
+        self.pen_at_candidate = 0.0;
+        self.first_kern = 0.0;
+    }
+
+    fn flush(&mut self, text: &'a str, start: usize, end: usize) {
+        if start < end {
+            self.out.push(Token::Text(&text[start..end]));
+        }
+    }
+}
+
+/// 空白のたぐい。
+fn is_space(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\u{3000}')
+}
+
+/// 語の切れ目に空白を置かない字。字と字のあいだで折ってよい。
+fn is_cjk(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3000..=0x303F      // 約物
+            | 0x3040..=0x309F // ひらがな
+            | 0x30A0..=0x30FF // カタカナ
+            | 0x3400..=0x4DBF // 漢字（拡張 A）
+            | 0x4E00..=0x9FFF // 漢字
+            | 0xF900..=0xFAFF // 互換漢字
+            | 0xFF00..=0xFF60 // 全角
+            | 0xFF61..=0xFF9F // 半角カタカナ
+    )
+}
+
+/// 行頭に置けない字。この字の前では折らない。
+fn starts_forbidden(character: char) -> bool {
+    matches!(
+        character,
+        '、' | '。'
+            | '，'
+            | '．'
+            | '・'
+            | '：'
+            | '；'
+            | '？'
+            | '！'
+            | 'ー'
+            | '〜'
+            | '…'
+            | '‥'
+            | 'ゝ'
+            | 'ゞ'
+            | '々'
+            | 'ヽ'
+            | 'ヾ'
+            | '）'
+            | '」'
+            | '』'
+            | '】'
+            | '〕'
+            | '｝'
+            | '〉'
+            | '》'
+            | 'ぁ'
+            | 'ぃ'
+            | 'ぅ'
+            | 'ぇ'
+            | 'ぉ'
+            | 'っ'
+            | 'ゃ'
+            | 'ゅ'
+            | 'ょ'
+            | 'ゎ'
+            | 'ァ'
+            | 'ィ'
+            | 'ゥ'
+            | 'ェ'
+            | 'ォ'
+            | 'ッ'
+            | 'ャ'
+            | 'ュ'
+            | 'ョ'
+            | 'ヮ'
+            | 'ヵ'
+            | 'ヶ'
+            | ','
+            | '.'
+            | '!'
+            | '?'
+            | ':'
+            | ';'
+            | ')'
+            | ']'
+            | '}'
+    )
+}
+
+/// 行末に置けない字。この字のうしろでは折らない。
+fn ends_forbidden(character: char) -> bool {
+    matches!(
+        character,
+        '（' | '「' | '『' | '【' | '〔' | '｛' | '〈' | '《' | '(' | '[' | '{'
+    )
 }
 
 #[cfg(test)]
@@ -2562,5 +2962,265 @@ mod tests {
         assert!(!JointType::Round.caps_start() && !JointType::Round.caps_end());
         assert!(JointType::RoundStartEnd.caps_start() && JointType::RoundStartEnd.caps_end());
         assert!(JointType::RoundStart.caps_start() && !JointType::RoundStart.caps_end());
+    }
+
+    // --- 折り返し ---
+
+    fn fold<'a>(text: &'a str, style: &TextStyle, width: f32, mode: WrapMode) -> Formatted<'a> {
+        wrap_with(&FakeFont, &Formatted::plain(text), style, width, mode)
+    }
+
+    /// 折り返した結果を、改行を `|` にした 1 本の文字列にして見る。
+    fn folded(text: &str, style: &TextStyle, width: f32, mode: WrapMode) -> String {
+        let mut out = String::new();
+
+        for token in fold(text, style, width, mode).tokens() {
+            match token {
+                Token::Text(text) => out.push_str(text),
+                Token::Format(TextFormat::NewLine) => out.push('|'),
+                Token::Format(_) => {}
+            }
+        }
+
+        out
+    }
+
+    /// 折り返して並べたときの行数。
+    fn rows(text: &str, style: &TextStyle, width: f32, mode: WrapMode) -> usize {
+        let folded = fold(text, style, width, mode);
+        let mut layout = TextLayout::default();
+        layout_with(&FakeFont, &folded, style, &mut layout);
+
+        layout.rows.len()
+    }
+
+    /// 折り返して並べたときの、いちばん長い行の送り幅。
+    fn folded_width(text: &str, style: &TextStyle, width: f32, mode: WrapMode) -> f32 {
+        let folded = fold(text, style, width, mode);
+        let mut layout = TextLayout::default();
+        layout_with(&FakeFont, &folded, style, &mut layout);
+
+        layout.width
+    }
+
+    #[test]
+    fn text_that_fits_is_left_alone() {
+        let style = TextStyle::new(20.0);
+
+        // 見せかけのフォントは送り幅 0.5 em。大きさ 20 なので 1 字 10.0。
+        assert_eq!(folded("abc", &style, 100.0, WrapMode::Word), "abc");
+    }
+
+    #[test]
+    fn a_space_is_where_latin_folds() {
+        let style = TextStyle::new(20.0);
+
+        // "aaa bbb" は 70.0。幅 50 なら空白で折れる。
+        assert_eq!(folded("aaa bbb", &style, 50.0, WrapMode::Word), "aaa|bbb");
+    }
+
+    /// 折った所の空白は、次の行の頭には回さない。字下げに見えるため。
+    #[test]
+    fn a_folded_line_never_starts_with_a_space() {
+        let style = TextStyle::new(20.0);
+
+        let folded = folded("aa bb cc dd", &style, 30.0, WrapMode::Word);
+
+        assert!(!folded.contains("| "), "行頭に空白が残っている（{folded}）");
+    }
+
+    #[test]
+    fn latin_never_folds_inside_a_word_by_itself() {
+        let style = TextStyle::new(20.0);
+
+        // 1 語で幅を超えても、Word なら折らずにはみ出す。
+        assert_eq!(folded("aaaaaa", &style, 30.0, WrapMode::Word), "aaaaaa");
+        assert!(folded_width("aaaaaa", &style, 30.0, WrapMode::Word) > 30.0);
+    }
+
+    #[test]
+    fn a_long_word_folds_when_asked() {
+        let style = TextStyle::new(20.0);
+
+        assert_eq!(
+            folded("aaaaaa", &style, 30.0, WrapMode::WordOrCharacter),
+            "aaa|aaa",
+        );
+        assert!(folded_width("aaaaaa", &style, 30.0, WrapMode::WordOrCharacter) <= 30.0);
+    }
+
+    /// 日本語は語の切れ目に空白が無いので、字と字のあいだで折る。
+    #[test]
+    fn japanese_folds_between_characters() {
+        let style = TextStyle::new(20.0);
+
+        assert_eq!(folded("あいうえお", &style, 30.0, WrapMode::Word), "あいう|えお");
+    }
+
+    /// 行頭に置けない字の前では折らない。
+    #[test]
+    fn a_closing_mark_does_not_start_a_line() {
+        let style = TextStyle::new(20.0);
+
+        // そのまま折ると "あいう|、え" になり、行頭に読点が来る。
+        let folded = folded("あいう、え", &style, 30.0, WrapMode::Word);
+
+        assert!(!folded.contains("|、"), "行頭に読点が来ている（{folded}）");
+    }
+
+    #[test]
+    fn an_opening_mark_does_not_end_a_line() {
+        let style = TextStyle::new(20.0);
+
+        let folded = folded("あい「うえお", &style, 30.0, WrapMode::Word);
+
+        assert!(!folded.contains("「|"), "行末に始め括弧が来ている（{folded}）");
+    }
+
+    /// 禁則を見ないモードなら、どこでも折る。
+    #[test]
+    fn character_mode_ignores_the_forbidden_marks() {
+        let style = TextStyle::new(20.0);
+
+        assert_eq!(
+            folded("あいう、え", &style, 30.0, WrapMode::Character),
+            "あいう|、え",
+        );
+    }
+
+    #[test]
+    fn a_written_newline_still_breaks() {
+        let style = TextStyle::new(20.0);
+
+        // 折り返しが要らない幅でも、書いてある改行はそのまま。
+        assert_eq!(rows("ab\ncd", &style, 1000.0, WrapMode::Word), 2);
+    }
+
+    #[test]
+    fn folding_resets_the_width_for_the_next_line() {
+        let style = TextStyle::new(20.0);
+
+        // 3 字ずつで 4 行。ペンを引き継ぎ損ねると行数がずれる。
+        assert_eq!(rows("あいうえおかきくけこかき", &style, 30.0, WrapMode::Word), 4);
+    }
+
+    #[test]
+    fn the_result_never_exceeds_the_width() {
+        let style = TextStyle::new(20.0);
+
+        for width in [10.0, 25.0, 30.0, 47.0, 100.0] {
+            let got = folded_width("あいうえおかきくけこ", &style, width, WrapMode::Word);
+
+            assert!(got <= width, "幅 {width} に対して {got}");
+        }
+    }
+
+    /// 折るときは、**次の行に移した語のぶんもペンに引き継ぐ**。
+    ///
+    /// 引き継ぎ損ねると 2 行目から詰め込みすぎる。日本語は字ごとに折れて
+    /// 移す語が無いので、ここは空白のある字で見ないと捕まらない。
+    #[test]
+    fn the_moved_word_counts_towards_the_next_line() {
+        let style = TextStyle::new(20.0);
+
+        for width in [30.0, 50.0, 70.0] {
+            let got = folded_width("aaa bbb ccc ddd", &style, width, WrapMode::Word);
+
+            assert!(got <= width, "幅 {width} に対して {got}");
+        }
+    }
+
+    /// 書式をまたいで折れる。語が色の切れ目で分かれていても同じ。
+    #[test]
+    fn folding_works_across_a_format_change() {
+        let style = TextStyle::new(20.0);
+
+        let formatted = Formatted::parse("§[red]あい§[blue]うえお").expect("読めなかった");
+        let folded = wrap_with(&FakeFont, &formatted, &style, 30.0, WrapMode::Word);
+
+        let mut layout = TextLayout::default();
+        layout_with(&FakeFont, &folded, &style, &mut layout);
+
+        assert_eq!(layout.rows.len(), 2);
+        assert!(layout.width <= 30.0, "{}", layout.width);
+
+        // 色は切っても残る。
+        assert_eq!(layout.glyphs.len(), 5);
+        assert_ne!(layout.glyphs[0].style.color, layout.glyphs[4].style.color);
+    }
+
+    /// 書式で字を大きくしたら、そのぶん早く折れる。
+    #[test]
+    fn a_bigger_run_folds_sooner() {
+        let style = TextStyle::new(20.0);
+
+        let small = Formatted::plain("あいうえお");
+        let big = Formatted::parse("§[size 40]あいうえお").expect("読めなかった");
+
+        let count = |formatted: &Formatted| {
+            let folded = wrap_with(&FakeFont, formatted, &style, 30.0, WrapMode::Word);
+            let mut layout = TextLayout::default();
+            layout_with(&FakeFont, &folded, &style, &mut layout);
+            layout.rows.len()
+        };
+
+        assert!(count(&big) > count(&small), "大きい字のほうが行数が多いはず");
+    }
+
+    #[test]
+    fn a_useless_width_folds_nothing() {
+        let style = TextStyle::new(20.0);
+
+        for width in [0.0, -5.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(folded("あいうえお", &style, width, WrapMode::Word), "あいうえお");
+        }
+    }
+
+    /// 1 字も入らない幅でも、行あたり 1 字は置く。空行が無限に増えないこと。
+    #[test]
+    fn a_width_narrower_than_one_character_still_terminates() {
+        let style = TextStyle::new(20.0);
+
+        assert_eq!(rows("あいう", &style, 1.0, WrapMode::WordOrCharacter), 3);
+    }
+
+    #[test]
+    fn an_empty_string_folds_to_nothing() {
+        let style = TextStyle::new(20.0);
+
+        assert!(fold("", &style, 30.0, WrapMode::Word).is_empty());
+    }
+
+    /// 折っても字は落ちない。
+    ///
+    /// **折った所の空白だけは消えます。** 境目そのものであって、
+    /// どちらの行の中身でもないからです。空白以外は 1 字も動きません。
+    #[test]
+    fn folding_keeps_every_character() {
+        let style = TextStyle::new(20.0);
+        let source = "あいうえお、かきくけこ。abc def";
+
+        let without_spaces = |text: &str| -> String {
+            text.chars().filter(|c| !is_space(*c) && *c != '|').collect()
+        };
+
+        for mode in [WrapMode::Word, WrapMode::WordOrCharacter, WrapMode::Character] {
+            let kept = folded(source, &style, 35.0, mode);
+
+            assert_eq!(
+                without_spaces(&kept),
+                without_spaces(source),
+                "{mode:?} で字が変わった",
+            );
+        }
+    }
+
+    #[test]
+    fn the_space_that_folded_the_line_is_dropped() {
+        let style = TextStyle::new(20.0);
+
+        // "aaa " のままだと、見えない空白のぶん幅を超える。
+        assert_eq!(folded("aaa bbb", &style, 30.0, WrapMode::Word), "aaa|bbb");
+        assert!(folded_width("aaa bbb", &style, 30.0, WrapMode::Word) <= 30.0);
     }
 }

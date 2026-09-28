@@ -12,3 +12,7 @@ wgpu.workspace = true
 bytemuck.workspace = true
 bitflags = "2.13.1"
 ttf-parser = "0.25.1"
+typesafe_builder.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true

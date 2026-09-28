@@ -18,7 +18,7 @@
 //! ```no_run
 //! # use gueiz_2d::resource::Resources;
 //! # use gueiz_2d::effect::{Block, EffectStage};
-//! # use gueiz_2d::object::DrawManager;
+//! # use gueiz_2d::draw_manager::DrawManager;
 //! # fn run(
 //! #     device: &gueiz_2d::wgpu::Device,
 //! #     draw_manager: &mut DrawManager,
@@ -53,7 +53,7 @@ use gueiz_gpu::resource::{Handle, Store};
 use crate::effect::{Block, CustomBlock, EffectStage, CUSTOM_KIND_BASE};
 use crate::error::Gueiz2DError;
 use crate::font::Font;
-use crate::object::draw_manager::DrawManager;
+use crate::draw_manager::DrawManager;
 use crate::sprite::SpriteSheet;
 
 /// フォントの取っ手。
@@ -352,7 +352,7 @@ impl Resources {
     /// 2 度目以降は、**前に上げたぶんはそのまま**で、増えたぶんだけを足します。
     ///
     /// ```no_run
-    /// # use gueiz_2d::object::DrawManager;
+    /// # use gueiz_2d::draw_manager::DrawManager;
     /// # use gueiz_2d::resource::Resources;
     /// # fn run(
     /// #     device: &gueiz_2d::wgpu::Device,

@@ -20,8 +20,8 @@ use std::error::Error;
 use common::preview::Preview;
 
 use gueiz_2d::camera::Camera;
-use gueiz_2d::object::draw_manager::{DrawManager, DrawManagerDescriptor};
-use gueiz_2d::object::{self, instance};
+use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::{self, instance, object};
 use gueiz_2d::paint_type::PaintType;
 use gueiz_2d::post::{PostChain, PostEffect, PostProcessor};
 use gueiz_2d::texture::TextureFormat;
@@ -32,7 +32,7 @@ const SIZE: u32 = 512;
 
 /// sRGB ではなく素の形式を使う。読み戻した値がそのまま線形なので、
 /// 「2 倍したら 2 倍」と計算で確かめられる。
-const FORMAT: TextureFormat = TextureFormat::Bgra8Unorm;
+const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
 /// 白い四角の範囲。
 const SQUARE: (f32, f32, f32, f32) = (100.0, 100.0, 300.0, 300.0);
@@ -87,8 +87,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pixels = harness.run(&device, &queue, &chain)?;
     preview.capture("ColorGrade(明るさ 0.5)", SIZE, SIZE, &pixels);
     let half = red(&pixels, INSIDE);
-    println!("2. ColorGrade(明るさ 0.5)    中={half}");
-    assert!(half.abs_diff(128) <= 2, "{half} は 128 前後のはず");
+    println!("2. ColorGrade(明るさ 0.5)    中={half}（光が半分）");
+    // 光を半分にした値。描き先が sRGB なので 128 ではなく 188 で書き出される。
+    assert!(half.abs_diff(188) <= 2, "{half} は 188 前後のはず（光の半分）");
 
     // 3. ビネット。中心は残り、角が落ちる。
     let mut chain = PostChain::new();

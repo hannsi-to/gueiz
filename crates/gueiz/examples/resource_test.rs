@@ -21,8 +21,8 @@ use common::preview::Preview;
 
 use gueiz_2d::camera::Camera;
 use gueiz_2d::effect::EffectStage;
-use gueiz_2d::object::draw_manager::{DrawManager, DrawManagerDescriptor};
-use gueiz_2d::object::{self, instance};
+use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::{self, instance, object};
 use gueiz_2d::paint_type::PaintType;
 use gueiz_2d::resource::{FontHandle, Resources};
 use gueiz_2d::sprite::{SpriteFilter, SpriteSheet};
@@ -32,7 +32,7 @@ use gueiz_2d::vertex::Vertex;
 use gueiz_2d::wgpu;
 
 const SIZE: u32 = 256;
-const FORMAT: TextureFormat = TextureFormat::Bgra8Unorm;
+const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 const FONT_PATH: &str = "C:/Windows/Fonts/arial.ttf";
 
 /// シート 1 層の大きさ。全面を緑にする。
@@ -127,9 +127,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pixels = draw_with_effect(&device, &queue, &target, &resources, darken, 0.5)?;
     preview.capture("2 つめのエフェクト（半分に）", SIZE, SIZE, &pixels);
     let middle = rgb(&pixels, SIZE / 2, SIZE / 2);
-    println!("6. 2 つめのエフェクト         中={middle:?}");
+    println!("6. 2 つめのエフェクト         中={middle:?}（光が半分）");
     for channel in middle {
-        assert!(channel.abs_diff(128) <= 2, "{channel} は 128 前後のはず");
+        // 光を半分にした値。sRGB では 128 ではなく 188。
+        assert!(channel.abs_diff(188) <= 2, "{channel} は 188 前後のはず");
     }
 
     // 7. 同じ名前で入れ替えると、古い取っ手は死ぬ。

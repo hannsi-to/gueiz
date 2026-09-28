@@ -29,6 +29,21 @@
 //! | インスタンス出力 | `STORAGE \| VERTEX` | **GPU**（コンピュートパス） |
 //! | インダイレクト引数 | `STORAGE \| INDIRECT \| COPY_DST` | CPU が初期化、**GPU** が個数を書く |
 //!
+//! # 色は sRGB で受け取る
+//!
+//! 頂点の色も、複製の色味も、エフェクトの色も **sRGB** で書きます。
+//! `#808080` と書けば、画面でも `#808080` の灰色が出ます。
+//!
+//! 受け取った色は**頂点シェーダの入口で線形の光に直します**。掛け算も
+//! 混ぜも合成も線形で行い、出すときに GPU が sRGB へ戻します。
+//! 絵（`Rgba8UnormSrgb`）もサンプルした時点で線形なので、同じ空間で揃います。
+//!
+//! 直さないと `0.5` が真ん中の灰色ではなく、かなり明るい灰色（sRGB 188）で
+//! 出ます。**両端（0 と 1）は動かない**ので、原色だけ見ていると気づけません。
+//!
+//! **不透明度は変換しません。** 光の量ではなく覆う割合なので、
+//! ガンマを掛けると半透明がずれます。
+//!
 //! # アルファ
 //!
 //! 出力は**乗算済みアルファ**（`rgb` に `a` が掛かった状態）で、ブレンドは
@@ -52,6 +67,7 @@
 //! 動かさない図形は、登録した最初のフレーム以降いっさい CPU 時間を食わない。
 
 use crate::buffer::{Allocation, BufferHeap, BufferHeapDescriptor};
+use std::ops::Range;
 use std::sync::Arc;
 
 use fxhash::FxHashMap;
@@ -60,10 +76,12 @@ use gueiz_gpu::instance::{InstanceSource, InstanceUploader};
 use gueiz_gpu::msaa::NO_MULTISAMPLE;
 use gueiz_gpu::pool::{Pool, PoolSource};
 
-use crate::effect::{BlockRaw, CustomBlock, EffectStage, CUSTOM_KIND_BASE};
+use crate::clip::{self, ClipMask, ClipMaskKind};
+use crate::effect::{Block, BlockRaw, CustomBlock, EffectStage, CUSTOM_KIND_BASE};
 use crate::error::Gueiz2DError;
-use crate::object::instance::Instance;
-use crate::object::object::Object;
+use crate::instance::Instance;
+use crate::object::Object;
+use crate::post::PostChain;
 use crate::sprite::SpriteSheet;
 use crate::texture::TextureFormat;
 use crate::vertex::Vertex;
@@ -93,6 +111,11 @@ pub struct DrawManagerDescriptor {
     /// **描き先のアタッチメントと同じ数**にすること。
     /// [`gueiz_gpu::msaa::MultisampleTarget`] が面倒を見る。
     pub sample_count: u32,
+    /// クリップの覆い 1 枚の辺の長さ（画素）。縁のなめらかさがこれで決まる。
+    ///
+    /// 覆いは 1 枚ごとにテクスチャ配列の 1 層を使うので、
+    /// 1 枚あたり `辺 * 辺` バイト。256 なら 64KB。
+    pub clip_mask_resolution: u32,
 }
 
 impl Default for DrawManagerDescriptor {
@@ -104,9 +127,13 @@ impl Default for DrawManagerDescriptor {
             max_effect_blocks: DEFAULT_MAX_EFFECT_BLOCKS,
             culling: true,
             sample_count: NO_MULTISAMPLE,
+            clip_mask_resolution: DEFAULT_CLIP_MASK_RESOLUTION,
         }
     }
 }
+
+/// クリップの覆いの既定の辺の長さ。
+pub const DEFAULT_CLIP_MASK_RESOLUTION: u32 = 256;
 
 /// 図形 1 つぶんの記述。コンピュートシェーダが読む。
 ///
@@ -118,6 +145,11 @@ impl Default for DrawManagerDescriptor {
 struct ObjectRaw {
     /// `camera * object`。インスタンスの変換はこの後に GPU 側で掛かる。
     transform: [[f32; 4]; 4],
+    /// カメラだけの逆行列。クリップ位置からワールド座標に戻すのに使う。
+    ///
+    /// 図形ごとに 1 つなので、インスタンスを増やしても増えない。
+    /// カメラが逆行列を持てないときは単位行列（クリップ空間 = ワールド）。
+    camera_inverse: [[f32; 4]; 4],
     vertex_base: u32,
     vertex_count: u32,
     instance_base: u32,
@@ -273,6 +305,7 @@ impl From<&Instance> for InstanceIn {
 const CULL_SHADER: &str = r#"
 struct ObjectDesc {
     transform: mat4x4<f32>,
+    camera_inverse: mat4x4<f32>,
     vertex_base: u32,
     vertex_count: u32,
     instance_base: u32,
@@ -492,6 +525,7 @@ var<storage, read> shape_pool: array<PoolVertex>;
 // コンピュート側と同じ並び。頂点シェーダが外接矩形と切り出し範囲を読む。
 struct ObjectDesc {
     transform: mat4x4<f32>,
+    camera_inverse: mat4x4<f32>,
     vertex_base: u32,
     vertex_count: u32,
     instance_base: u32,
@@ -516,6 +550,13 @@ var sprite_sheet: texture_2d_array<f32>;
 
 @group(0) @binding(5)
 var sprite_sampler: sampler;
+
+// 焼いたクリップの覆い。1 枚が 1 層。
+@group(0) @binding(6)
+var clip_masks: texture_2d_array<f32>;
+
+@group(0) @binding(7)
+var clip_sampler: sampler;
 
 /// エフェクトの 1 山。Rust 側の `BlockRaw` と並びを揃える。
 struct EffectBlock {
@@ -562,7 +603,139 @@ fn noise21(point: vec2<f32>) -> f32 {
 }
 
 /// Color 段の 1 山を掛ける。VFX Graph の Output Context の Block にあたる。
-fn apply_color_block(color: vec4<f32>, block: EffectBlock, uv: vec2<f32>, time: f32) -> vec4<f32> {
+/// クリップの距離から、その画素がどれだけ残るかを出す。
+///
+/// `distance` は外を正とする符号付き距離（ワールド単位）。
+/// `softness` が 0 でも、1 画素ぶんはなめらかに落とす。
+fn clip_coverage(distance: f32, softness: f32, world_per_pixel: f32) -> f32 {
+    let feather = max(softness, 0.0) * 0.5 + world_per_pixel;
+
+    return 1.0 - smoothstep(-feather, feather, distance);
+}
+
+/// 裏返す指定が立っていれば、内と外を入れ替える。
+fn clip_flip(coverage: f32, invert: f32) -> f32 {
+    return select(coverage, 1.0 - coverage, invert != 0.0);
+}
+
+/// 覆いを掛けた色を返す。出すのは乗算前なので、不透明度だけを削る。
+fn clip_apply(color: vec4<f32>, coverage: f32) -> vec4<f32> {
+    return vec4<f32>(color.rgb, color.a * coverage);
+}
+
+/// 角の丸い矩形までの符号付き距離。中が負、外が正。
+fn clip_rect_distance(point: vec2<f32>, low: vec2<f32>, high: vec2<f32>, radius: f32) -> f32 {
+    let half = (high - low) * 0.5;
+    let center = (high + low) * 0.5;
+
+    // 丸みは半分の幅・高さを超えられない。
+    let corner = clamp(radius, 0.0, min(half.x, half.y));
+    let offset = abs(point - center) - (half - vec2<f32>(corner));
+
+    return length(max(offset, vec2<f32>(0.0))) + min(max(offset.x, offset.y), 0.0) - corner;
+}
+
+/// 楕円までの距離。円のときは厳密で、細長いほど縁の幅がわずかにずれる。
+fn clip_ellipse_distance(point: vec2<f32>, center: vec2<f32>, radii: vec2<f32>) -> f32 {
+    let safe = max(radii, vec2<f32>(1e-6));
+    let offset = (point - center) / safe;
+
+    return (length(offset) - 1.0) * min(safe.x, safe.y);
+}
+
+/// その山が積みで何個ぶんを占めるか。**必ず 1 以上を返す。**
+///
+/// これは節約であって、無くても絵は変わらない。色を収めた続きは
+/// `switch` に無い番号なので、踏んでも素通りするだけ。
+/// ただし**多く見積もるとあとの山が飛ばされる**ので、
+/// `Block::raw_count` と同じ数え方であること。
+///
+/// 0 を返すと、色を混ぜる輪が進まなくなる。
+fn block_span(block: EffectBlock) -> u32 {
+    // グラデーションは色を 2 つずつ収めた続きを従える。
+    if (block.kind == 14u || block.kind == 15u || block.kind == 16u) {
+        return 1u + (u32(block.color_a.x) + 1u) / 2u;
+    }
+
+    return 1u;
+}
+
+/// 色を置いた並びから、`ratio` のところの色を引く。
+///
+/// 色は積むときに線形へ直してあるので、ここでの混ぜは光の量どうしの混ぜ。
+fn gradient_color(base: u32, count: u32, spread: f32, ratio: f32) -> vec4<f32> {
+    var position = ratio;
+
+    // 0..1 の外をどう埋めるか。
+    if (spread == 1.0) {
+        position = fract(position);
+    } else if (spread == 2.0) {
+        let folded = fract(position * 0.5) * 2.0;
+        position = select(folded, 2.0 - folded, folded > 1.0);
+    } else {
+        position = clamp(position, 0.0, 1.0);
+    }
+
+    // 色は 2 つずつ収まっている。`index` 番目を引く。
+    let stop = func_stop(base, 0u);
+    var low = stop;
+    var high = stop;
+
+    for (var index = 1u; index < count; index = index + 1u) {
+        let current = func_stop(base, index);
+
+        if (current.position <= position) {
+            low = current;
+        } else {
+            high = current;
+            break;
+        }
+
+        high = current;
+    }
+
+    let span = high.position - low.position;
+
+    // 同じ位置に重なっていたら混ぜようがない。後ろを採る。
+    if (span <= 0.0) {
+        return high.color;
+    }
+
+    return mix(low.color, high.color, clamp((position - low.position) / span, 0.0, 1.0));
+}
+
+struct GradientStop {
+    position: f32,
+    color: vec4<f32>,
+}
+
+/// 色を収めた続きから `index` 番目を取り出す。2 つで 1 つぶん。
+fn func_stop(base: u32, index: u32) -> GradientStop {
+    let entry = blocks[base + 1u + index / 2u];
+
+    var stop: GradientStop;
+
+    if (index % 2u == 0u) {
+        stop.position = entry.params.x;
+        stop.color = entry.color_a;
+    } else {
+        stop.position = entry.params.y;
+        stop.color = entry.color_b;
+    }
+
+    return stop;
+}
+
+fn apply_color_block(
+    color: vec4<f32>,
+    at: u32,
+    uv: vec2<f32>,
+    time: f32,
+    world: vec2<f32>,
+    world_per_pixel: f32,
+) -> vec4<f32> {
+    let block = blocks[at];
+
     switch block.kind {
         // Tint: 色を掛ける。
         case 5u: {
@@ -595,6 +768,105 @@ fn apply_color_block(color: vec4<f32>, block: EffectBlock, uv: vec2<f32>, time: 
             let factor = 1.0 - block.params.x + sin(time * block.params.y) * block.params.x;
             return vec4<f32>(color.rgb, color.a * factor);
         }
+        // ClipRect: 矩形の外を削る。
+        case 9u: {
+            let distance = clip_rect_distance(
+                world,
+                block.params.xy,
+                block.params.zw,
+                block.color_a.x,
+            );
+            let coverage = clip_coverage(distance, block.color_a.y, world_per_pixel);
+
+            return clip_apply(color, clip_flip(coverage, block.color_a.z));
+        }
+        // ClipEllipse: 楕円の外を削る。
+        case 10u: {
+            let distance = clip_ellipse_distance(world, block.params.xy, block.params.zw);
+            let coverage = clip_coverage(distance, block.color_a.x, world_per_pixel);
+
+            return clip_apply(color, clip_flip(coverage, block.color_a.y));
+        }
+        // ClipHalfPlane: 直線の向こう側を削る。積むと凸多角形になる。
+        case 11u: {
+            let normal = block.params.xy;
+            let span = length(normal);
+
+            // 向きが決まらなければ削らない。
+            if (span < 1e-6) {
+                return color;
+            }
+
+            let distance = dot(normal / span, world) - block.params.z / span;
+            let coverage = clip_coverage(distance, block.params.w, world_per_pixel);
+
+            return clip_apply(color, clip_flip(coverage, block.color_a.x));
+        }
+        // ClipDistanceMask: 距離を焼いた覆い。拡大しても縁が保てる。
+        case 13u: {
+            let uv = (world - block.params.xy) * block.params.zw;
+            let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
+
+            let sampled = textureSampleLevel(
+                clip_masks,
+                clip_sampler,
+                clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)),
+                i32(block.color_a.x),
+                0.0,
+            ).r;
+
+            // 0.5 が境目で、大きいほうが中。外を正にして距離に戻す。
+            let distance = (0.5 - sampled) * 2.0 * block.color_a.z;
+            let coverage = clip_coverage(distance, block.color_a.w, world_per_pixel);
+
+            return clip_apply(color, clip_flip(select(0.0, coverage, inside), block.color_a.y));
+        }
+        // ClipMask: 焼いた覆いの外を削る。式で書けない形はこれ。
+        case 12u: {
+            // params.zw は幅と高さの逆数。画素ごとの割り算を省いてある。
+            let uv = (world - block.params.xy) * block.params.zw;
+
+            // 覆いの外は必ず削る。`clip::cover` が縁を 1 升ぶん内側に逃がしている
+            // ので、いまは端を引いても 0 が返る。手で組んだ山が範囲とずれていても
+            // 漏らさないための備えで、外から見て違いは出ない。
+            let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
+
+            // ミップは要らないので段を指定して引く。
+            // 微分を使わないぶん、一様でない制御フローの中でも安全。
+            let sampled = textureSampleLevel(
+                clip_masks,
+                clip_sampler,
+                clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)),
+                i32(block.color_a.x),
+                0.0,
+            ).r;
+
+            let coverage = select(0.0, sampled, inside);
+
+            return clip_apply(color, clip_flip(coverage, block.color_a.y));
+        }
+        // GradientStops（線形）: 一方向に流れる。
+        case 14u: {
+            let direction = vec2<f32>(cos(block.params.x), sin(block.params.x));
+            let ratio = dot(uv - 0.5, direction) + 0.5;
+
+            return color * gradient_color(at, u32(block.color_a.x), block.color_a.y, ratio);
+        }
+        // GradientStops（放射）: 中心から広がる。
+        case 15u: {
+            let radii = max(abs(block.params.zw), vec2<f32>(1e-6));
+            let ratio = length((uv - block.params.xy) / radii);
+
+            return color * gradient_color(at, u32(block.color_a.x), block.color_a.y, ratio);
+        }
+        // GradientStops（角度）: 中心のまわりを一周する。
+        case 16u: {
+            let offset = uv - block.params.xy;
+            let angle = atan2(offset.y, offset.x) - block.params.z;
+            let ratio = fract(angle / TAU + 1.0);
+
+            return color * gradient_color(at, u32(block.color_a.x), block.color_a.y, ratio);
+        }
 //GUEIZ_CUSTOM_COLOR
         default: {
             return color;
@@ -619,6 +891,8 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
     /// 図形ローカルの UV。外接矩形を 0..1 に正規化したもの。エフェクトが使う。
     @location(1) uv: vec2<f32>,
+    /// ワールド座標。頂点を置いたのと同じ空間。クリップが使う。
+    @location(7) world_position: vec2<f32>,
     /// スプライトシートを読む UV。図形ローカルの UV を切り出し範囲に写したもの。
     @location(2) sprite_uv: vec2<f32>,
     // 索引と層はインスタンスごとに同じなので、補間しない。
@@ -646,12 +920,28 @@ fn vs_main(
 
     var output: VertexOutput;
     output.clip_position = transform * vec4<f32>(vertex.x, vertex.y, vertex.z, 1.0);
-    output.color = instance.tint * vec4<f32>(vertex.r, vertex.g, vertex.b, vertex.a);
+
+    // 色は sRGB で受け取り、ここで線形に直す。以降の掛け算・混ぜ・合成は
+    // 全部線形で行う。絵も `Rgba8UnormSrgb` なので、読んだ時点で線形。
+    // 不透明度は光の量ではなく覆う割合なので、変換しない。
+    let vertex_color = vec4<f32>(
+        srgb_to_linear(vec3<f32>(vertex.r, vertex.g, vertex.b)),
+        vertex.a,
+    );
+    let tint = vec4<f32>(srgb_to_linear(instance.tint.rgb), instance.tint.a);
+
+    output.color = tint * vertex_color;
 
     // テッセレータは UV を書かないので、外接矩形から作る。
     // 四角なら 0..1 がちょうど四隅に来るので、絵が素直に収まる。
     let object = objects[instance.object_index];
     let uv = (vec2<f32>(vertex.x, vertex.y) - object.bounds.xy) * object.bounds.zw;
+
+    // カメラだけ巻き戻してワールドに戻す。
+    // 頂点に掛かったのは camera * object * instance なので、
+    // カメラを取り除けば object * instance * 頂点、つまりワールド座標になる。
+    let world = object.camera_inverse * output.clip_position;
+    output.world_position = world.xy / world.w;
 
     output.uv = uv;
     // 切り出し範囲に写す。コマ送りはここを動かすだけで済む。
@@ -662,6 +952,24 @@ fn vs_main(
     output.texture_layer = object.texture_layer;
     output.has_sprite = object.has_sprite;
     return output;
+}
+
+const TAU: f32 = 6.2831855;
+
+/// sRGB の値を線形の光に直す。
+///
+/// 描き先が sRGB なので、出すときは GPU が逆向きに直します。
+/// ここで直しておかないと、`0.5` が真ん中の灰色ではなく
+/// かなり明るい灰色（sRGB 188）で出ます。
+///
+/// 折れ線ではなく規格どおりの式を使うのは、暗いほうの取りこぼしを
+/// 避けるためです。`0.0` と `1.0` は変換しても動きません。
+fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
+    let cutoff = color <= vec3<f32>(0.04045);
+    let low = color / 12.92;
+    let high = pow((color + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+
+    return select(high, low, cutoff);
 }
 
 @fragment
@@ -679,9 +987,38 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         );
     }
 
+    // 画素 1 つぶんがワールドで何単位か。縁をなめらかに落とすのに使う。
+    //
+    // 微分は一様な制御フローの中でしか取れないので、山の輪に入る前にここで 1 度だけ求める。
+    // クリップの距離場はどれもワールド単位の真の距離なので、これがそのまま縁の幅になる。
+    let world_per_pixel = max(
+        max(abs(dpdx(input.world_position.x)), abs(dpdy(input.world_position.y))),
+        1e-6,
+    );
+
     // Color 段。積まれた順に掛ける。
-    for (var step = 0u; step < input.color_count; step = step + 1u) {
-        color = apply_color_block(color, blocks[input.color_base + step], input.uv, config.time);
+    //
+    // 1 山が 2 つ以上を占めることがある（グラデーションは色を収める続きを従える）。
+    // 山が自分で「いくつ使ったか」を言うので、そのぶんまとめて進む。
+    var step = 0u;
+
+    loop {
+        if (step >= input.color_count) {
+            break;
+        }
+
+        let at = input.color_base + step;
+
+        color = apply_color_block(
+            color,
+            at,
+            input.uv,
+            config.time,
+            input.world_position,
+            world_per_pixel,
+        );
+
+        step = step + block_span(blocks[at]);
     }
 
     // 山どうしは「普通の」アルファ（rgb と a が独立）で計算し、出すときだけ
@@ -717,6 +1054,10 @@ pub struct DrawManager {
     sample_count: u32,
     /// いま貼っている絵。差し替えるとバインドグループを組み直す。
     sprite_sheet: Arc<SpriteSheet>,
+    /// 焼いたクリップの覆い。使っていなくても 1 層だけ持っておく。
+    clip_masks: ClipMaskSheet,
+    /// 使われている層と、それが覆うワールドの範囲。
+    clip_mask_bounds: FxHashMap<u32, [f32; 4]>,
 
     pool_heap: BufferHeap,
     block_heap: BufferHeap,
@@ -743,6 +1084,11 @@ pub struct DrawManager {
     effect_ranges: Vec<EffectRange>,
     /// 描く順。z の小さい順に並べた図形の番号。
     draw_order: Vec<usize>,
+    /// 1 回のパスで描けるまとまり。描く順に並ぶ。
+    ///
+    /// 並べ替えたあと、**掛けるエフェクトが変わるところで切って**作る。
+    /// 同じものが続くあいだは 1 回で描けるので、パスは必要な数しか出ない。
+    passes: Vec<PassGroup>,
     /// エフェクトのプールを積み直す必要がある。
     effects_dirty: bool,
     /// 秒。Transform / Color 段の山に渡る。
@@ -956,20 +1302,43 @@ impl DrawManager {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // クリップの覆い。図形がひとつも使っていなくても繋いでおく。
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
         // 絵を指定していない図形もここを読む。真っ白なので掛けても変わらない。
         let sprite_sheet = Arc::new(SpriteSheet::white(device, queue));
 
+        // 覆いを 1 枚も使わなくても、束ねる先は要る。最初は 1 層だけ。
+        let clip_masks = ClipMaskSheet::new(device, descriptor.clip_mask_resolution, 1);
+
         let render_bind_group = build_render_bind_group(
             device,
-            &render_bind_group_layout,
-            pool_heap.buffer(),
-            block_heap.buffer(),
-            &config_buffer,
-            object_heap.buffer(),
-            &sprite_sheet,
+            RenderBindings {
+                layout: &render_bind_group_layout,
+                pool: pool_heap.buffer(),
+                blocks: block_heap.buffer(),
+                config: &config_buffer,
+                objects: object_heap.buffer(),
+                sprite_sheet: &sprite_sheet,
+                clip_masks: &clip_masks,
+            },
         );
 
         let render_pipeline_layout =
@@ -1005,6 +1374,8 @@ impl DrawManager {
             surface_format,
             sample_count: descriptor.sample_count.max(1),
             sprite_sheet,
+            clip_masks,
+            clip_mask_bounds: FxHashMap::default(),
             pool_heap,
             block_heap,
             object_heap,
@@ -1035,6 +1406,7 @@ impl DrawManager {
             object_scratch: Vec::new(),
             indirect_scratch: Vec::new(),
             draw_count: 0,
+            passes: Vec::new(),
         })
     }
 
@@ -1046,7 +1418,8 @@ impl DrawManager {
     /// 以降の書き換えは [`DrawManager::object_mut`] から。
     ///
     /// ```no_run
-    /// # use gueiz_2d::object::{self, DrawManager};
+    /// # use gueiz_2d::draw_manager::DrawManager;
+    /// # use gueiz_2d::object;
     /// # fn run(draw_manager: &mut DrawManager, square: object::Object) {
     /// let name = draw_manager.register(square);
     ///
@@ -1108,7 +1481,7 @@ impl DrawManager {
     /// 名前で引いて書き換える。
     ///
     /// ```no_run
-    /// # use gueiz_2d::object::DrawManager;
+    /// # use gueiz_2d::draw_manager::DrawManager;
     /// # fn run(draw_manager: &mut DrawManager) {
     /// if let Some(square) = draw_manager.object_mut("Square") {
     ///     square.z(2.0);
@@ -1159,7 +1532,7 @@ impl DrawManager {
     /// # fn run(
     /// #     device: &gueiz_2d::wgpu::Device,
     /// #     queue: &gueiz_2d::wgpu::Queue,
-    /// #     draw_manager: &mut gueiz_2d::object::DrawManager,
+    /// #     draw_manager: &mut gueiz_2d::draw_manager::DrawManager,
     /// # ) -> Result<(), gueiz_2d::error::Gueiz2DError> {
     /// let sheet = SpriteSheet::new(device, queue, 32, 32, &[&[0u8; 32 * 32 * 4]], SpriteFilter::Nearest)?;
     /// draw_manager.set_sprite_sheet(device, sheet);
@@ -1175,15 +1548,156 @@ impl DrawManager {
 
         self.render_bind_group = build_render_bind_group(
             device,
-            &self.render_bind_group_layout,
-            self.pool_heap.buffer(),
-            self.block_heap.buffer(),
-            &self.config_buffer,
-            self.object_heap.buffer(),
-            &sprite_sheet,
+            RenderBindings {
+                layout: &self.render_bind_group_layout,
+                pool: self.pool_heap.buffer(),
+                blocks: self.block_heap.buffer(),
+                config: &self.config_buffer,
+                objects: self.object_heap.buffer(),
+                sprite_sheet: &sprite_sheet,
+                clip_masks: &self.clip_masks,
+            },
         );
 
         self.sprite_sheet = sprite_sheet;
+    }
+
+    /// 図形を焼いてクリップの覆いにする。返った [`ClipMask`] の `block()` を
+    /// 別の図形に積むと、その形の外が削れます。
+    ///
+    /// 焼くのは**そのときの形だけ**です。図形を組み替えたら
+    /// [`DrawManager::update_clip_mask`] で焼き直してください。
+    /// 位置・回転・拡大（[`Object::translate`] など）や複製は見ません。
+    /// 頂点を置いた座標そのままで覆います。
+    ///
+    /// ```no_run
+    /// # fn run(
+    /// #     device: &gueiz_2d::wgpu::Device,
+    /// #     queue: &gueiz_2d::wgpu::Queue,
+    /// #     draw_manager: &mut gueiz_2d::draw_manager::DrawManager,
+    /// #     star: &gueiz_2d::object::Object,
+    /// #     photo: &mut gueiz_2d::object::Object,
+    /// # ) {
+    /// use gueiz_2d::clip::ClipMaskKind;
+    ///
+    /// let mask = draw_manager.add_clip_mask(device, queue, star, ClipMaskKind::Coverage);
+    /// photo.effect(mask.block());
+    /// # }
+    /// ```
+    pub fn add_clip_mask(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shape: &Object,
+        kind: ClipMaskKind,
+    ) -> ClipMask {
+        let layer = match self.clip_masks.take() {
+            Some(layer) => layer,
+            None => {
+                self.clip_masks.grow(device, queue);
+                self.rebuild_render_bind_group(device);
+
+                // 増やした直後なので必ず空きがある。
+                self.clip_masks.take().expect("層を増やしたのに空きがない")
+            }
+        };
+
+        let mask = self.bake(queue, layer, shape, kind);
+
+        self.clip_mask_bounds.insert(layer, mask.bounds());
+        mask
+    }
+
+    /// 焼き直す。層はそのままなので、積んである山はそのまま使えます。
+    ///
+    /// **覆う範囲は変わります。** 形が動いたなら、積み直すか
+    /// [`ClipMask::block`] を取り直してください。
+    pub fn update_clip_mask(
+        &mut self,
+        queue: &wgpu::Queue,
+        mask: ClipMask,
+        shape: &Object,
+    ) -> ClipMask {
+        let updated = self.bake(queue, mask.layer(), shape, mask.kind());
+
+        self.clip_mask_bounds.insert(mask.layer(), updated.bounds());
+        updated
+    }
+
+    /// 覆いを捨てて層を空ける。空いた層は次の [`DrawManager::add_clip_mask`] が使います。
+    ///
+    /// **捨てた覆いの山を積んだままにしないこと。** 層が使い回されると
+    /// 別の形で削られます。
+    pub fn remove_clip_mask(&mut self, queue: &wgpu::Queue, mask: ClipMask) {
+        let blank = vec![0u8; (self.clip_masks.resolution * self.clip_masks.resolution) as usize];
+
+        self.clip_masks.write(queue, mask.layer(), &blank);
+        self.clip_masks.give_back(mask.layer());
+        self.clip_mask_bounds.remove(&mask.layer());
+    }
+
+    /// いま使われている覆いの枚数。
+    pub fn clip_mask_count(&self) -> usize {
+        self.clip_mask_bounds.len()
+    }
+
+    /// 覆い 1 枚の辺の長さ（画素）。
+    pub fn clip_mask_resolution(&self) -> u32 {
+        self.clip_masks.resolution
+    }
+
+    /// 用意してある層の数。足りなくなると倍に増える。
+    pub fn clip_mask_capacity(&self) -> u32 {
+        self.clip_masks.layers
+    }
+
+    /// 形を焼いて層に載せる。
+    fn bake(
+        &self,
+        queue: &wgpu::Queue,
+        layer: u32,
+        shape: &Object,
+        kind: ClipMaskKind,
+    ) -> ClipMask {
+        let resolution = self.clip_masks.resolution;
+        let triangles = shape.triangles();
+
+        match kind {
+            ClipMaskKind::Coverage => {
+                // 縁が升目の境目に乗ると薄くなるので、1 画素ぶん外に逃がす。
+                let bounds = clip::cover(triangles, resolution, 1.0, false);
+
+                self.clip_masks
+                    .write(queue, layer, &clip::rasterise(triangles, bounds, resolution));
+
+                ClipMask::new(layer, bounds, kind, 0.0)
+            }
+
+            ClipMaskKind::Distance => {
+                // 距離が頭打ちになる手前まで余白を取り、縦横の縮尺を揃える。
+                let bounds = clip::cover(triangles, resolution, clip::SPREAD, true);
+                let (pixels, spread) = clip::distance_field(triangles, bounds, resolution);
+
+                self.clip_masks.write(queue, layer, &pixels);
+
+                ClipMask::new(layer, bounds, kind, spread)
+            }
+        }
+    }
+
+    fn rebuild_render_bind_group(&mut self, device: &wgpu::Device) {
+        self.render_bind_group = build_render_bind_group(
+            device,
+            RenderBindings {
+                layout: &self.render_bind_group_layout,
+                pool: self.pool_heap.buffer(),
+                blocks: self.block_heap.buffer(),
+                config: &self.config_buffer,
+                objects: self.object_heap.buffer(),
+                sprite_sheet: &self.sprite_sheet,
+                clip_masks: &self.clip_masks,
+            },
+        );
     }
 
     /// いま貼っている絵。
@@ -1210,7 +1724,7 @@ impl DrawManager {
     ///
     /// ```no_run
     /// # use gueiz_2d::effect::{CustomBlock, EffectStage, CUSTOM_KIND_BASE};
-    /// # fn run(device: &gueiz_2d::wgpu::Device, draw_manager: &mut gueiz_2d::object::DrawManager)
+    /// # fn run(device: &gueiz_2d::wgpu::Device, draw_manager: &mut gueiz_2d::draw_manager::DrawManager)
     /// #     -> Result<(), gueiz_2d::error::Gueiz2DError> {
     /// draw_manager.set_custom_blocks(device, &[CustomBlock {
     ///     kind: CUSTOM_KIND_BASE,
@@ -1331,17 +1845,51 @@ impl DrawManager {
 
     /// GPU が書いた引数どおりに描く。CPU が出すコマンドは 1 つだけ。
     pub fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>) {
-        if self.draw_count == 0 {
+        self.draw_indirect_range(render_pass, 0..self.draw_count);
+    }
+
+    /// 1 回のパスで描けるまとまりを、描く順に。
+    ///
+    /// **掛けるエフェクトが変わるところで切ってあります。** まとまりごとに
+    /// 別の絵へ描いて、その鎖を通してから重ねると、図形ごとのぼかしになります。
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::draw_manager::DrawManager;
+    /// # fn run(draw_manager: &DrawManager) {
+    /// for pass in draw_manager.passes() {
+    ///     // pass.range を描いて、pass.chain を通して重ねる。
+    ///     let _ = (&pass.range, pass.chain);
+    /// }
+    /// # }
+    /// ```
+    pub fn passes(&self) -> impl Iterator<Item = DrawPass<'_>> {
+        self.passes.iter().map(|group| DrawPass {
+            layer: group.layer,
+            range: group.range.clone(),
+            chain: &group.chain,
+        })
+    }
+
+    /// インダイレクトの一部だけ描く。[`DrawManager::passes`] の範囲を渡す。
+    pub fn draw_range(&self, render_pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
+        self.draw_indirect_range(render_pass, range);
+    }
+
+    fn draw_indirect_range(&self, render_pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
+        // 描く数が 0 のときにインダイレクトを呼ぶと、実装によっては怒られる。
+        if self.draw_count == 0 || range.start >= range.end {
             return;
         }
+
+        let stride = size_of::<wgpu::util::DrawIndirectArgs>() as u64;
 
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, &self.render_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.instance_output_heap.slice(&self.instance_output));
         render_pass.multi_draw_indirect(
             self.indirect_heap.buffer(),
-            self.indirect.offset(),
-            self.draw_count,
+            self.indirect.offset() + range.start as u64 * stride,
+            range.end - range.start,
         );
     }
 
@@ -1403,11 +1951,19 @@ impl DrawManager {
             let color_blocks = effects.blocks(EffectStage::Color);
 
             // 入り切らないぶんは捨てる。黙って化けるよりは出ないほうがよい。
+            //
+            // 数えるのは**積む数**であって山の数ではない。グラデーションは
+            // 色を収める続きを従えるので、1 山で 2 つ以上になることがある。
             let room = self.max_effect_blocks.saturating_sub(base) as usize;
-            let transform_count = transform_blocks.len().min(room);
-            let color_count = color_blocks.len().min(room - transform_count);
 
-            if transform_count < transform_blocks.len() || color_count < color_blocks.len() {
+            let transform_count = fit(transform_blocks, room, &mut self.block_scratch);
+            let color_count = fit(
+                color_blocks,
+                room - transform_count.written,
+                &mut self.block_scratch,
+            );
+
+            if transform_count.dropped || color_count.dropped {
                 log::warn!(
                     "the effect block limit ({}) is reached; some blocks on '{}' will not run",
                     self.max_effect_blocks,
@@ -1415,15 +1971,10 @@ impl DrawManager {
                 );
             }
 
-            self.block_scratch
-                .extend(transform_blocks[..transform_count].iter().map(|b| b.to_raw()));
-            self.block_scratch
-                .extend(color_blocks[..color_count].iter().map(|b| b.to_raw()));
-
             self.effect_ranges[index] = EffectRange {
                 base,
-                transform_count: transform_count as u32,
-                color_count: color_count as u32,
+                transform_count: transform_count.written as u32,
+                color_count: color_count.written as u32,
             };
 
             object.clear_effects_dirty();
@@ -1472,8 +2023,40 @@ impl DrawManager {
         let mut draw_order = std::mem::take(&mut self.draw_order);
         draw_order.clear();
         draw_order.extend(0..object_limit);
-        // 安定ソートなので、z が同じなら登録順のまま。
-        draw_order.sort_by(|&a, &b| self.objects[a].depth().total_cmp(&self.objects[b].depth()));
+        // **層が先、その中で z。** 層ごとにまとめて描けるよう、
+        // 同じ層が続きになるように並べる。
+        // 安定ソートなので、どちらも同じなら登録順のまま。
+        draw_order.sort_by(|&a, &b| {
+            let (left, right) = (&self.objects[a], &self.objects[b]);
+
+            left.in_layer()
+                .cmp(&right.in_layer())
+                .then_with(|| left.depth().total_cmp(&right.depth()))
+        });
+
+        // パスのまとまりを作る。`passes` がここを見る。
+        //
+        // 層が変わるか、掛けるエフェクトが変わったところで切る。
+        // 同じものが続くあいだは 1 回で描けるので、無駄なパスが出ない。
+        self.passes.clear();
+
+        for (position, &index) in draw_order.iter().enumerate() {
+            let object = &self.objects[index];
+            let (layer, chain) = (object.in_layer(), object.post_chain());
+            let position = position as u32;
+
+            match self.passes.last_mut() {
+                Some(last) if last.layer == layer && &last.chain == chain => {
+                    last.range.end = position + 1;
+                }
+
+                _ => self.passes.push(PassGroup {
+                    layer,
+                    range: position..position + 1,
+                    chain: chain.clone(),
+                }),
+            }
+        }
 
         for &index in &draw_order {
             let pool_range = self.shape_pool.range(index);
@@ -1485,6 +2068,13 @@ impl DrawManager {
             self.object_scratch.push(ObjectRaw {
                 // カメラと図形の変換まではここで畳む。インスタンスは GPU 側。
                 transform: object.view_transform().to_columns(),
+                // クリップ位置からワールドに戻す道。潰れたカメラなら素通しにする。
+                camera_inverse: object
+                    .view_camera()
+                    .view_projection()
+                    .inverse_2d()
+                    .unwrap_or_default()
+                    .to_columns(),
                 vertex_base: pool_range.base,
                 vertex_count: pool_range.count,
                 instance_base: instance_range.base,
@@ -1724,15 +2314,31 @@ fn draw_args_bytes(args: &[wgpu::util::DrawIndirectArgs]) -> &[u8] {
 }
 
 /// 描画側のバインドグループを組む。絵を差し替えるたびに組み直す。
+/// 描画側のバインドグループに繋ぐもの。
+struct RenderBindings<'a> {
+    layout: &'a wgpu::BindGroupLayout,
+    pool: &'a wgpu::Buffer,
+    blocks: &'a wgpu::Buffer,
+    config: &'a wgpu::Buffer,
+    objects: &'a wgpu::Buffer,
+    sprite_sheet: &'a SpriteSheet,
+    clip_masks: &'a ClipMaskSheet,
+}
+
 fn build_render_bind_group(
     device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    pool: &wgpu::Buffer,
-    blocks: &wgpu::Buffer,
-    config: &wgpu::Buffer,
-    objects: &wgpu::Buffer,
-    sprite_sheet: &SpriteSheet,
+    bindings: RenderBindings<'_>,
 ) -> wgpu::BindGroup {
+    let RenderBindings {
+        layout,
+        pool,
+        blocks,
+        config,
+        objects,
+        sprite_sheet,
+        clip_masks,
+    } = bindings;
+
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("gueiz shape pool bind group"),
         layout,
@@ -1761,8 +2367,208 @@ fn build_render_bind_group(
                 binding: 5,
                 resource: wgpu::BindingResource::Sampler(sprite_sheet.sampler()),
             },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&clip_masks.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Sampler(&clip_masks.sampler),
+            },
         ],
     })
+}
+
+/// 焼いたクリップの覆いを収めるテクスチャ配列。1 枚が 1 層。
+///
+/// 層が足りなくなったら倍に増やし、古い中身をそのまま写します。
+/// どれだけ増えても 1 枚のテクスチャなので、**ドローの数は増えません**。
+struct ClipMaskSheet {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+    /// 1 層の辺の長さ（画素）。
+    resolution: u32,
+    /// 用意してある層の数。
+    layers: u32,
+    /// 次に配る層。
+    next: u32,
+    /// 返された層。先に使い回す。
+    free: Vec<u32>,
+}
+
+impl ClipMaskSheet {
+    fn new(device: &wgpu::Device, resolution: u32, layers: u32) -> Self {
+        let resolution = resolution.max(1);
+        let layers = layers.max(1);
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("gueiz clip masks"),
+            size: wgpu::Extent3d {
+                width: resolution,
+                height: resolution,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // 覆う割合しか要らないので 1 チャンネル。
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        Self {
+            view: texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            }),
+            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("gueiz clip mask sampler"),
+                // 縁の外に漏れないよう、端は 0 で止める。
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
+            texture,
+            resolution,
+            layers,
+            next: 0,
+            free: Vec::new(),
+        }
+    }
+
+    /// 層を 1 つ確保する。空きが無ければ `None`。
+    fn take(&mut self) -> Option<u32> {
+        if let Some(layer) = self.free.pop() {
+            return Some(layer);
+        }
+
+        if self.next < self.layers {
+            let layer = self.next;
+            self.next += 1;
+            return Some(layer);
+        }
+
+        None
+    }
+
+    /// 層を返す。中身は消してから返す側で消す。
+    fn give_back(&mut self, layer: u32) {
+        if layer < self.next && !self.free.contains(&layer) {
+            self.free.push(layer);
+        }
+    }
+
+    /// 層を倍に増やし、古い中身を写す。
+    fn grow(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let grown = Self::new(device, self.resolution, self.layers * 2);
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("gueiz clip mask grow"),
+        });
+
+        encoder.copy_texture_to_texture(
+            self.texture.as_image_copy(),
+            grown.texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: self.resolution,
+                height: self.resolution,
+                depth_or_array_layers: self.layers,
+            },
+        );
+
+        queue.submit(Some(encoder.finish()));
+
+        let (next, free) = (self.next, std::mem::take(&mut self.free));
+        *self = grown;
+        self.next = next;
+        self.free = free;
+    }
+
+    /// 1 層を書き換える。`pixels` は `resolution * resolution` バイト。
+    fn write(&self, queue: &wgpu::Queue, layer: u32, pixels: &[u8]) {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.resolution),
+                rows_per_image: Some(self.resolution),
+            },
+            wgpu::Extent3d {
+                width: self.resolution,
+                height: self.resolution,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+}
+
+/// 1 回のパスで描くまとまり。持ち主は [`DrawManager`]。
+struct PassGroup {
+    layer: u32,
+    range: Range<u32>,
+    chain: PostChain,
+}
+
+/// [`DrawManager::passes`] が返す、1 回ぶんのパス。
+pub struct DrawPass<'a> {
+    /// どの層か。同じ層でも、掛けるものが違えば分かれる。
+    pub layer: u32,
+    /// [`DrawManager::draw_range`] に渡す範囲。
+    pub range: Range<u32>,
+    /// このまとまりに掛けるもの。空なら素のまま重ねるだけ。
+    pub chain: &'a PostChain,
+}
+
+/// 積めるだけ積む。
+struct Fitted {
+    /// 実際に積んだ数。山の数ではなく、GPU に載る数。
+    written: usize,
+    /// 入り切らずに捨てたものがあるか。
+    dropped: bool,
+}
+
+/// 山を、入るぶんだけ積む。
+///
+/// 1 山が 2 つ以上になることがあるので、**山の途中で切らない**。
+/// 半端に積むと、色を収める続きだけが残って化ける。
+fn fit(blocks: &[Block], room: usize, out: &mut Vec<BlockRaw>) -> Fitted {
+    let mut written = 0;
+
+    for (index, block) in blocks.iter().enumerate() {
+        let needed = block.raw_count();
+
+        if written + needed > room {
+            return Fitted {
+                written,
+                dropped: index < blocks.len(),
+            };
+        }
+
+        block.write_raw(out);
+        written += needed;
+    }
+
+    Fitted {
+        written,
+        dropped: false,
+    }
 }
 
 /// 頂点を囲む矩形を `[min_x, min_y, 1/幅, 1/高さ]` に直す。

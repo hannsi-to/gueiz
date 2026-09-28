@@ -18,13 +18,13 @@ use common::preview::Preview;
 use gueiz_2d::camera::Camera;
 use gueiz_2d::font::Font;
 use gueiz_2d::format::Formatted;
-use gueiz_2d::object::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
 use gueiz_2d::text::{TextLayout, TextRenderer, TextStyle, measure_formatted};
 use gueiz_2d::texture::TextureFormat;
 use gueiz_2d::wgpu;
 
 const SIZE: u32 = 256;
-const FORMAT: TextureFormat = TextureFormat::Bgra8Unorm;
+const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
 /// これより明るければ「塗られている」とみなす。
 const LIT: u8 = 16;
@@ -151,13 +151,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert!(top > bottom + 5.0, "上が右に寄っているはず");
 
     // 6. 透かす。同じ白でも暗くなること。
+    //
+    //    0.6 透かすと覆いは 0.4。黒の上なので**光の量が 0.4** になる。
+    //    描き先は sRGB なので、書き出されるのは 128*0.4 = 51 ではなく **170**。
+    //    「見た目の半分」と「光の半分」は別もの。
     let (ghost, _) = draw("§[ghost 0.6]A", 100.0, 20.0, 20.0)?;
     let solid_brightness = mean_lit(&plain.pixels)[0] as u32;
     let ghost_brightness = mean_lit(&ghost.pixels)[0] as u32;
     println!(
-        "6. 透かす                   素 {solid_brightness} → 0.6 透かして {ghost_brightness}",
+        "6. 透かす                   素 {solid_brightness} → 0.6 透かして {ghost_brightness}（光は 0.4）",
     );
-    assert!(ghost_brightness < solid_brightness * 2 / 3);
+    assert!(ghost_brightness < solid_brightness, "透けていない");
+    assert!(
+        ghost_brightness.abs_diff(170) <= 3,
+        "{ghost_brightness} は 170 前後のはず（光 0.4 を sRGB に直した値）",
+    );
 
     // 7. 縁取り。字の周りに別の色が回ること。
     let (outlined, _) = draw("§[outline #ff0000]A", 100.0, 20.0, 20.0)?;
@@ -433,6 +441,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         lit_count(&clipped.pixels) < lit_count(&whole.pixels),
         "送り幅で寄せても切れないなら、測る意味が無い",
     );
+
+    // 18. 色の空間。**書いた sRGB がそのまま出ること。**
+    //
+    //     描き先は窓と同じ sRGB。色は sRGB で受け取り、シェーダの入口で
+    //     線形に直し、出すときに GPU が sRGB へ戻す。往復して元に戻るので、
+    //     `#808080` は 128 で出る。
+    //
+    //     ここが崩れると、原色（0 と 1）は無事なのに**中間調だけ**ずれます。
+    //     気づきにくいので、名指しで押さえておく。
+    println!("18. 色の空間");
+
+    for level in [0x00_u8, 0x40, 0x80, 0xc0, 0xff] {
+        let value = level as f32 / 255.0;
+        let (frame, _) = draw(&format!("§[color {value} {value} {value}]A"), 140.0, 40.0, 20.0)?;
+
+        // いちばん明るい画素が、書いた色そのもの。
+        let brightest = (0..SIZE)
+            .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
+            .map(|(x, y)| pixel(&frame.pixels, x, y)[1])
+            .max()
+            .unwrap_or(0);
+
+        println!("    #{level:02x}{level:02x}{level:02x} と書いて {brightest} が出る");
+
+        assert!(
+            brightest.abs_diff(level) <= 2,
+            "#{level:02x} を書いて {brightest} が出た。sRGB の往復が崩れている",
+        );
+    }
 
     println!("\nすべて通りました。");
 

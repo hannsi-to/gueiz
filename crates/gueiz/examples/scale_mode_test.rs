@@ -16,8 +16,8 @@ use std::error::Error;
 use common::preview::Preview;
 
 use gueiz_2d::camera::{Camera, ScaleMode};
-use gueiz_2d::object::draw_manager::{DrawManager, DrawManagerDescriptor};
-use gueiz_2d::object::{self, instance};
+use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::{self, instance, object};
 use gueiz_2d::paint_type::PaintType;
 use gueiz_2d::texture::TextureFormat;
 use gueiz_2d::vertex::Vertex;
@@ -35,7 +35,7 @@ const ORIGIN: f32 = (DESIGN - SQUARE) / 2.0;
 const WIDTH: u32 = 256;
 const HEIGHT: u32 = 128;
 
-const FORMAT: TextureFormat = TextureFormat::Bgra8Unorm;
+const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();

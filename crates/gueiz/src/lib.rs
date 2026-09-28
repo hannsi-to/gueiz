@@ -14,7 +14,8 @@
 //!
 //! ```no_run
 //! use gueiz::two_d::camera::Camera;
-//! use gueiz::two_d::object::{self, DrawManager, instance};
+//! use gueiz::two_d::draw_manager::DrawManager;
+//! use gueiz::two_d::{instance, object};
 //! use gueiz::two_d::paint_type::PaintType;
 //! use gueiz::two_d::vertex::Vertex;
 //!

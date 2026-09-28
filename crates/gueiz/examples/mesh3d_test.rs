@@ -28,7 +28,7 @@ use gueiz_3d::wgpu;
 const SIZE: u32 = 256;
 
 /// sRGB を通さない形式。読み戻した値がそのまま計算結果になる。
-const FORMAT: TextureFormat = TextureFormat::Bgra8Unorm;
+const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
@@ -67,9 +67,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pixels = render(&device, &queue, &target, &[Cube::new(WHITE, 0.0)], Light::Behind)?;
     preview.capture("背後から光（環境光 0.25）", SIZE, SIZE, &pixels);
     let dim = rgb(&pixels, CENTRE);
-    println!("2. 背後から光（環境光 0.25）    中={dim:?}");
+    println!("2. 背後から光（環境光 0.25）    中={dim:?}（光が 0.25）");
     for channel in dim {
-        assert!(channel.abs_diff(64) <= 2, "{channel} は 64 前後のはず");
+        // 光の量が 0.25。描き先が sRGB なので 64 ではなく 137 で書き出される。
+        assert!(channel.abs_diff(137) <= 2, "{channel} は 137 前後のはず");
     }
 
     // 3 と 4 が本題。**深度バッファが描く順に勝つ**こと。

@@ -22,14 +22,14 @@ use common::preview::Preview;
 
 use gueiz_2d::camera::Camera;
 use gueiz_2d::font::Font;
-use gueiz_2d::object::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
 use gueiz_2d::text::{TextRenderer, TextStyle, layout};
 use gueiz_2d::texture::TextureFormat;
 use gueiz_2d::msaa::{MultisampleTarget, DEFAULT_MULTISAMPLE, NO_MULTISAMPLE};
 use gueiz_2d::wgpu;
 
 const SIZE: u32 = 256;
-const FORMAT: TextureFormat = TextureFormat::Bgra8Unorm;
+const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
 /// 手元にあるフォント。無ければ分かるように落とす。
 const FONT_PATH: &str = "C:/Windows/Fonts/arial.ttf";

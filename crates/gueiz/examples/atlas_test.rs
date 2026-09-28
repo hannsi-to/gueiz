@@ -23,8 +23,8 @@ use common::preview::Preview;
 
 use gueiz_2d::atlas::{AtlasDescriptor, MipLevels};
 use gueiz_2d::camera::Camera;
-use gueiz_2d::object::draw_manager::{DrawManager, DrawManagerDescriptor};
-use gueiz_2d::object::{self, instance};
+use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::{self, instance, object};
 use gueiz_2d::paint_type::PaintType;
 use gueiz_2d::resource::Resources;
 use gueiz_2d::sprite::SpriteFilter;
@@ -33,7 +33,7 @@ use gueiz_2d::vertex::Vertex;
 use gueiz_2d::wgpu;
 
 const SIZE: u32 = 256;
-const FORMAT: TextureFormat = TextureFormat::Bgra8Unorm;
+const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -394,8 +394,7 @@ fn render(
         let region = resources.texture(*handle).expect("上げてある");
         let [width, height] = region.size;
 
-        let mut quad =
-            object::create_object(&format!("Sprite {}", draw_manager.object_count()));
+        let mut quad = object::create_object(&format!("Sprite {}", draw_manager.object_count()));
         quad.begin(PaintType::Fill);
 
         for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {

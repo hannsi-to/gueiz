@@ -1165,12 +1165,28 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
 
     var output: VertexOutput;
     output.clip_position = scene.view_projection * world_position;
-    output.color = vertex.color * instance.tint;
+
+    // 色は sRGB で受け取り、ここで線形の光に直す。**光の計算は線形でないと
+    // 合わない。** 出すときに GPU が sRGB へ戻す。2D と同じ扱い。
+    // 不透明度は覆う割合なので変換しない。
+    let vertex_color = vec4<f32>(srgb_to_linear(vertex.color.rgb), vertex.color.a);
+    let tint = vec4<f32>(srgb_to_linear(instance.tint.rgb), instance.tint.a);
+
+    output.color = vertex_color * tint;
 
     // 法線は世界へ回すだけ。平行移動は乗せない（w = 0）。
     // 非一様な拡大をすると狂うが、そこは逆転置行列が要る話。
     output.world_normal = normalize((world * vec4<f32>(vertex.normal, 0.0)).xyz);
     return output;
+}
+
+/// sRGB の値を線形の光に直す。2D 側と同じ式。
+fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
+    let cutoff = color <= vec3<f32>(0.04045);
+    let low = color / 12.92;
+    let high = pow((color + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+
+    return select(high, low, cutoff);
 }
 
 @fragment

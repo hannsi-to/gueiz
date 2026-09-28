@@ -5,7 +5,7 @@ use crate::math::Mat4;
 /// 図形 1 つぶんの複製。オブジェクト自身の変換に、さらにこれが掛かる。
 ///
 /// ```no_run
-/// # use gueiz_2d::object::instance;
+/// # use gueiz_2d::instance;
 /// let instance = instance::create_instance()
 ///     .translate(100.0, 50.0, 0.0)
 ///     .color(1.0, 0.0, 0.0, 1.0);

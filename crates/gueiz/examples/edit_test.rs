@@ -16,7 +16,7 @@
 use std::error::Error;
 
 use gueiz_2d::camera::Camera;
-use gueiz_2d::object::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
 use gueiz_2d::object;
 use gueiz_2d::paint_type::PaintType;
 use gueiz_2d::texture::TextureFormat;

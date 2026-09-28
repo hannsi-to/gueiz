@@ -139,6 +139,7 @@ pub(crate) struct PostUniform {
 /// assert_eq!(chain.pass_count(), 4);
 /// ```
 #[derive(Clone)]
+#[derive(PartialEq)]
 #[derive(Default)]
 #[derive(Debug)]
 pub struct PostChain {
@@ -215,6 +216,8 @@ impl PostChain {
 /// 切り替えのぶんだけ無駄になる。
 pub struct PostProcessor {
     pipeline: wgpu::RenderPipeline,
+    /// 最後の 1 パスを**重ねて**書くほう。層を合成するのに使う。
+    over_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
@@ -222,6 +225,12 @@ pub struct PostProcessor {
     stride: u32,
     /// 収まるパスの数。
     capacity: u32,
+    /// このフレームで使い終わった設定の枠。
+    ///
+    /// **設定の書き込みは提出のときにまとめて効きます。** 層ごとに呼ぶと
+    /// 同じ枠を奪い合い、後の層の設定が前の層にも掛かってしまうので、
+    /// 呼ぶたびに先へ進めます。[`PostProcessor::begin_frame`] で頭に戻します。
+    used: u32,
     targets: Option<Targets>,
 }
 
@@ -283,32 +292,43 @@ impl PostProcessor {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("gueiz post pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    // 前のパスの結果を丸ごと置き換える。混ぜる必要はない。
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        // 置き換える用と、重ねる用。違うのは混ぜ方だけ。
+        let build = |label: &str, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        // 前のパスの結果を丸ごと置き換える。混ぜる必要はない。
+        let pipeline = build("gueiz post pipeline", None);
+
+        // 層を重ねるとき。すでに描かれているものの上に乗せる。
+        let over_pipeline = build(
+            "gueiz post over pipeline",
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        );
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("gueiz post sampler"),
@@ -333,11 +353,13 @@ impl PostProcessor {
 
         Self {
             pipeline,
+            over_pipeline,
             bind_group_layout,
             sampler,
             uniforms,
             stride,
             capacity: MAX_PASSES,
+            used: 0,
             targets: None,
         }
     }
@@ -424,6 +446,16 @@ impl PostProcessor {
         });
     }
 
+    /// 設定の枠を頭に戻す。**1 フレームに 1 回、いちばん先に呼びます。**
+    ///
+    /// 層ごとに [`PostProcessor::run_over`] を呼ぶなら必須です。呼ばないと
+    /// 枠を使い切って、途中から設定が載らなくなります。
+    ///
+    /// 1 フレームに [`PostProcessor::run`] を 1 回しか呼ばないなら要りません。
+    pub fn begin_frame(&mut self) {
+        self.used = 0;
+    }
+
     /// 場面を描き込む先。ここに描いてから [`PostProcessor::run`] を呼ぶ。
     pub fn scene_view(
         &mut self,
@@ -443,20 +475,97 @@ impl PostProcessor {
 
     /// パスを順に走らせる。**最後の 1 パスだけ `destination` に直接書く。**
     ///
+    /// 書き先は**塗り替え**ます。すでに描かれているものは残りません。
+    /// 層を重ねるなら [`PostProcessor::run_over`] を使ってください。
+    ///
     /// [`PostProcessor::scene_view`] に場面を描いた後に呼ぶ。
     pub fn run(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         chain: &PostChain,
         destination: &wgpu::TextureView,
     ) {
-        let Some(targets) = self.targets.as_ref() else {
+        self.run_with(queue, encoder, chain, destination, false);
+    }
+
+    /// 同じだが、最後の 1 パスを **`destination` に重ねて**書く。
+    ///
+    /// 層ごとに違うエフェクトを掛けて 1 枚に積むのに使います。
+    /// [`PostProcessor::scene_view`] は**透明で消してから**描いてください。
+    /// 消さずに描くと、前の層が二重に乗ります。
+    ///
+    /// **鎖が空でも 1 パス走ります。** エフェクトの無い層も重ねる必要があるからです
+    /// （[`PostProcessor::run`] は空なら何もしません）。
+    ///
+    /// ```no_run
+    /// # use gueiz_gpu::post::{PostChain, PostProcessor};
+    /// # fn run(
+    /// #     device: &wgpu::Device,
+    /// #     queue: &wgpu::Queue,
+    /// #     encoder: &mut wgpu::CommandEncoder,
+    /// #     processor: &mut PostProcessor,
+    /// #     screen: &wgpu::TextureView,
+    /// #     chains: &[PostChain],
+    /// #     draw_layer: impl Fn(usize, &mut wgpu::RenderPass<'_>),
+    /// # ) {
+    /// for (layer, chain) in chains.iter().enumerate() {
+    ///     let scene = processor
+    ///         .scene_view(device, 1280, 720, wgpu::TextureFormat::Bgra8UnormSrgb)
+    ///         .clone();
+    ///
+    ///     {
+    ///         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    ///             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+    ///                 view: &scene,
+    ///                 depth_slice: None,
+    ///                 resolve_target: None,
+    ///                 ops: wgpu::Operations {
+    ///                     // 層ごとに透明で消す。前の層を引きずらない。
+    ///                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+    ///                     store: wgpu::StoreOp::Store,
+    ///                 },
+    ///             })],
+    ///             ..Default::default()
+    ///         });
+    ///
+    ///         draw_layer(layer, &mut pass);
+    ///     }
+    ///
+    ///     processor.run_over(queue, encoder, chain, screen);
+    /// }
+    /// # }
+    /// ```
+    pub fn run_over(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        chain: &PostChain,
+        destination: &wgpu::TextureView,
+    ) {
+        self.run_with(queue, encoder, chain, destination, true);
+    }
+
+    fn run_with(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        chain: &PostChain,
+        destination: &wgpu::TextureView,
+        over: bool,
+    ) {
+        if self.targets.is_none() {
             return;
-        };
+        }
 
         let total = chain.pass_count();
+
+        // 重ねるときは、エフェクトが無くても素通しの 1 パスで積む。
         if total == 0 {
+            if over {
+                self.passthrough(queue, encoder, destination);
+            }
+
             return;
         }
 
@@ -468,14 +577,36 @@ impl PostProcessor {
             );
         }
 
-        let total = total.min(self.capacity as usize);
+        // このフレームでまだ使っていない枠から取る。
+        let base = self.used;
+        let room = self.capacity.saturating_sub(base) as usize;
+
+        if total > room {
+            log::warn!(
+                "the post uniform slots ({}) are used up; some passes will not run",
+                self.capacity,
+            );
+        }
+
+        let total = total.min(room);
+
+        if total == 0 {
+            return;
+        }
+
+        self.used += total as u32;
+
+        let targets = self.targets.as_ref().expect("上で確かめてある");
         let texel = [1.0 / targets.width as f32, 1.0 / targets.height as f32];
 
         // 設定は先に全部上げる。パスの間でバッファを書き換えると順番が保証されない。
+        //
+        // **枠を層ごとに分けるのはこのため。** 書き込みは提出のときにまとめて効くので、
+        // 同じ枠を二度使うと、後から書いたほうが前のパスにも掛かる。
         for (index, (effect, pass)) in chain.passes().take(total).enumerate() {
             queue.write_buffer(
                 &self.uniforms,
-                (index as u32 * self.stride) as u64,
+                ((base + index as u32) * self.stride) as u64,
                 bytemuck::bytes_of(&effect.to_raw(pass, texel)),
             );
         }
@@ -503,15 +634,74 @@ impl PostProcessor {
                 ..Default::default()
             });
 
-            render_pass.set_pipeline(&self.pipeline);
+            // 書き先に直に出す最後の 1 パスだけ、重ねるかどうかが変わる。
+            let last = index == total - 1;
+
+            render_pass.set_pipeline(if over && last {
+                &self.over_pipeline
+            } else {
+                &self.pipeline
+            });
             render_pass.set_bind_group(
                 0,
                 &targets.bind_groups[source],
-                &[index as u32 * self.stride],
+                &[(base + index as u32) * self.stride],
             );
             // 画面を覆う三角形 1 枚。頂点バッファは要らない。
             render_pass.draw(0..3, 0..1);
         }
+    }
+
+    /// 何も掛けずに、場面をそのまま書き先へ重ねる。
+    fn passthrough(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        destination: &wgpu::TextureView,
+    ) {
+        let base = self.used;
+
+        if base >= self.capacity {
+            log::warn!("the post uniform slots are used up; a layer will not be composited");
+            return;
+        }
+
+        self.used += 1;
+
+        let targets = self.targets.as_ref().expect("呼ぶ前に確かめてある");
+        let texel = [1.0 / targets.width as f32, 1.0 / targets.height as f32];
+
+        // 種別 0 はシェーダの既定で、読んだ色をそのまま返す。
+        queue.write_buffer(
+            &self.uniforms,
+            (base * self.stride) as u64,
+            bytemuck::bytes_of(&PostUniform {
+                params: [0.0; 4],
+                color: [0.0; 4],
+                texel,
+                direction: [0.0; 2],
+                kind: 0,
+                _padding: [0; 3],
+            }),
+        );
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("gueiz post passthrough"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+
+        render_pass.set_pipeline(&self.over_pipeline);
+        render_pass.set_bind_group(0, &targets.bind_groups[0], &[base * self.stride]);
+        render_pass.draw(0..3, 0..1);
     }
 }
 

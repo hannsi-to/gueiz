@@ -26,8 +26,8 @@ use std::f32::consts::TAU;
 use std::time::Instant;
 
 use gueiz_2d::camera::Camera;
-use gueiz_2d::object::draw_manager::{DrawManager, DrawManagerDescriptor};
-use gueiz_2d::object::{self, instance};
+use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::{self, instance, object};
 use gueiz_2d::paint_type::{JointType, PaintType};
 use gueiz_2d::texture::TextureFormat;
 use gueiz_2d::vertex::Vertex;
@@ -189,6 +189,7 @@ fn build_scene(draw_manager: &mut DrawManager, total: u32) -> Vec<String> {
                 line_width: 4.0,
                 joint_type: JointType::Round,
                 strip: false,
+            dash: None,
             });
             for index in 0..(3 + kind) {
                 let angle = index as f32 * TAU / (3 + kind) as f32;

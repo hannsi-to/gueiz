@@ -17,6 +17,7 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-opengl/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-3d/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-gpu/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gueiz-2d/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

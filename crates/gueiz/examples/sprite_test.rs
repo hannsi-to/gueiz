@@ -20,8 +20,8 @@ use std::error::Error;
 use common::preview::Preview;
 
 use gueiz_2d::camera::Camera;
-use gueiz_2d::object::draw_manager::{DrawManager, DrawManagerDescriptor};
-use gueiz_2d::object::{self, instance};
+use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::{self, instance, object};
 use gueiz_2d::paint_type::PaintType;
 use gueiz_2d::sprite::{SpriteFilter, SpriteSheet};
 use gueiz_2d::texture::TextureFormat;
@@ -31,7 +31,7 @@ use gueiz_2d::wgpu;
 const SIZE: u32 = 256;
 
 /// sRGB を通さない形式。読み戻した値がそのまま絵の値になる。
-const FORMAT: TextureFormat = TextureFormat::Bgra8Unorm;
+const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
 /// シート 1 層の大きさ。左半分と右半分で色を変えてある。
 const SHEET: u32 = 16;

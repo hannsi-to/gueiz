@@ -62,7 +62,7 @@ pub const DEFAULT_LINE_WIDTH: f32 = 0.05;
 /// 名前の付いた色。
 ///
 /// 値は**そのまま**使います。ガンマ補正はしません。
-/// このクレートの他の色指定（[`crate::object::Instance::color`] など）と
+/// このクレートの他の色指定（[`crate::instance::Instance::color`] など）と
 /// 同じ扱いです。
 #[derive(Clone, Copy)]
 #[derive(Eq, PartialEq)]
@@ -447,6 +447,13 @@ impl<'a> Formatted<'a> {
     /// 空。[`Formatted::text`] と [`Formatted::format`] で組み立てる。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 組み終わったトークン列から作る。
+    ///
+    /// [`crate::text::wrap`] が、切った字のあいだに改行を挟んで返すのに使う。
+    pub(crate) fn from_tokens(tokens: Vec<Token<'a>>) -> Self {
+        Self { tokens }
     }
 
     /// 書式を解釈せず、丸ごと字として扱う。
