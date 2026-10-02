@@ -1640,11 +1640,13 @@ impl TextRenderer {
         let mut object = object::create_object(&format!("Glyph {} skew{} {:?}", glyph.0, skew, layer));
 
         let skew = skew as f32 / SKEW_STEPS;
-        object.begin(PaintType::Fill);
+        // 字形は輪郭の向きで塗る。日本語のフォントは画ごとの輪郭を重ねて
+        // 字を作るので、包含の偶奇で塗ると重なりが抜ける。
+        object.begin(PaintType::FillNonZero);
 
         for (index, point) in outline.points.iter().enumerate() {
             // 輪郭の切れ目で新しい輪郭を始める。外周か穴かは
-            // テッセレータが包含関係で決めるので、ここでは区別しない。
+            // 巻きの向きで決まるので、ここでは区別しない。
             if index > 0 && outline.contour_starts.contains(&index) {
                 object.begin_hole();
             }

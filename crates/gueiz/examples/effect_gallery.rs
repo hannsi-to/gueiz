@@ -56,6 +56,7 @@ use gueiz_2d::effect::{
 };
 use gueiz_2d::font::Font;
 use gueiz_2d::instance::create_instance;
+use gueiz_2d::msaa::DEFAULT_MULTISAMPLE;
 use gueiz_2d::object::{Object, create_object};
 use gueiz_2d::paint_type::{Dash, JointType, PaintType};
 use gueiz_2d::post::{PostEffect, PostProcessor};
@@ -71,8 +72,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-/// 手元にあるフォント。名札に使うだけなので、無くても絵は出ます。
-const FONT_PATH: &str = "C:/Windows/Fonts/arial.ttf";
+/// 名札の書体。日本語の字を持つものを探す。名札に使うだけなので、無くても絵は出ます。
+#[path = "common/font.rs"]
+mod example_font;
 
 /// 並べる升目。
 const COLUMNS: usize = 6;
@@ -646,16 +648,24 @@ struct Application {
 impl Application {
     fn new(renderer_backend: RendererBackend) -> Self {
         // 名札用。読めなければ名札だけ諦める。絵は出る。
-        let font = std::fs::read(FONT_PATH)
-            .ok()
-            .and_then(|data| Font::from_bytes(data.leak()).ok());
+        let font = match example_font::read_japanese_font() {
+            Ok((path, data)) => {
+                println!("書体: {path}\n");
+                Font::from_bytes(data.leak()).ok()
+            }
+            Err(error) => {
+                println!("{error}\n名札なしで出します。\n");
+                None
+            }
+        };
 
-        if font.is_none() {
-            println!("{FONT_PATH} が読めないので、名札なしで出します。\n");
-        }
+        // 縁を 4 点で均す。均さないと、小さい名札の細い画（1 px を割る）が
+        // 画素の中心を外れて途切れる。
+        let mut renderer = Renderer::new(renderer_backend);
+        renderer.set_sample_count(DEFAULT_MULTISAMPLE);
 
         Self {
-            renderer: Renderer::new(renderer_backend),
+            renderer,
             window: None,
             scene: None,
             font,
@@ -708,21 +718,18 @@ impl Application {
                     .clone();
 
                 {
+                    // 多点の描き先に描いて `view` へ均して書き出す。
+                    // まとまりごとに透明で消す。前のを引きずらない。
+                    let attachment = frame
+                        .multisample
+                        .color_attachment(&view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+
                     let mut pass =
                         frame
                             .encoder
                             .begin_render_pass(&wgpu::RenderPassDescriptor {
                                 label: Some("gallery layer"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &view,
-                                    depth_slice: None,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations {
-                                        // まとまりごとに透明で消す。前のを引きずらない。
-                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                        store: wgpu::StoreOp::Store,
-                                    },
-                                })],
+                                color_attachments: &[Some(attachment)],
                                 ..Default::default()
                             });
 
@@ -896,8 +903,12 @@ impl Scene {
             return Err("the renderer has no surface yet".into());
         };
 
-        let mut draw_manager =
-            DrawManager::new(device, queue, format, &DrawManagerDescriptor::default())?;
+        // 図形を描く側も、描き先と同じ数で均す。食い違うと wgpu が弾く。
+        let descriptor = DrawManagerDescriptor {
+            sample_count: renderer.sample_count(),
+            ..DrawManagerDescriptor::default()
+        };
+        let mut draw_manager = DrawManager::new(device, queue, format, &descriptor)?;
 
         // 「Custom (縞)」の中身。自前の WGSL を 1 つだけ積んでおく。
         draw_manager.set_custom_blocks(device, &[custom_stripes()])?;

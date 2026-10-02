@@ -476,7 +476,9 @@ fn write_text(
     let left = rect.x + options.horizontal.offset(rect.width, placed.width);
     let top = rect.y + options.vertical.offset(rect.height, placed.height);
 
-    object.begin(PaintType::Fill);
+    // 字形は輪郭の向きで塗る。日本語のフォントは画ごとの輪郭を重ねて
+    // 字を作るので、包含の偶奇で塗ると重なりが抜ける。
+    object.begin(PaintType::FillNonZero);
 
     let mut written = 0_usize;
 

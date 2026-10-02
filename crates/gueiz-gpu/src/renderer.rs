@@ -547,6 +547,14 @@ impl Renderer {
         // 設定の枠を頭に戻す。層ごとに掛けるならこれが要る。
         render_surface.post_processor.begin_frame();
 
+        // 均す数を決めてあれば、多点の描き先を用意して渡す。
+        render_surface.multisample.ensure(
+            &render_surface.device,
+            render_surface.surface_configuration.width,
+            render_surface.surface_configuration.height,
+            render_surface.surface_configuration.format,
+        );
+
         {
             let mut passes = FramePasses {
                 device: &render_surface.device,
@@ -554,6 +562,7 @@ impl Renderer {
                 encoder: &mut encoder,
                 target: &target,
                 post_processor: &mut render_surface.post_processor,
+                multisample: &render_surface.multisample,
                 width: render_surface.surface_configuration.width,
                 height: render_surface.surface_configuration.height,
                 format: render_surface.surface_configuration.format,
@@ -671,6 +680,15 @@ pub struct FramePasses<'a> {
     pub target: &'a wgpu::TextureView,
     /// 層ごとにエフェクトを掛けるのに使う。枠は戻してある。
     pub post_processor: &'a mut PostProcessor,
+    /// [`Renderer::set_sample_count`] で決めた数の描き先。大きさは合わせてある。
+    ///
+    /// 図形を描くパスはこれで組むと、均す設定がそのまま効きます。
+    /// 均さない設定なら、渡した描き先に直接描くアタッチメントが返ります。
+    ///
+    /// ```ignore
+    /// let attachment = frame.multisample.color_attachment(&view, wgpu::LoadOp::Clear(color));
+    /// ```
+    pub multisample: &'a MultisampleTarget,
     pub width: u32,
     pub height: u32,
     pub format: wgpu::TextureFormat,

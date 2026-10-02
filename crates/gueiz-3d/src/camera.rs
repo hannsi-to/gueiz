@@ -41,6 +41,20 @@ impl Camera3d {
         }
     }
 
+    /// **左右上下を別々に決める**透視投影のカメラ。
+    ///
+    /// 1 つの立体世界を複数の画面で分けて映すときに使います。画面ごとに近平面の
+    /// 一部を切り取れば、並べたときに 1 つの眺めとして繋がります。
+    ///
+    /// 左右・上下が釣り合っていれば [`Camera3d::perspective`] と同じです。
+    pub fn frustum(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Self {
+        Self {
+            projection: Mat4::frustum(left, right, bottom, top, near, far),
+            view: Mat4::IDENTITY,
+            eye: [0.0, 0.0, 0.0],
+        }
+    }
+
     /// 視点を置いて、注視点を向く。
     pub fn look_at(&mut self, eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> &mut Self {
         self.view = Mat4::look_at(eye, target, up);

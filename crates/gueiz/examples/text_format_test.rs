@@ -13,6 +13,7 @@ mod common;
 
 use std::error::Error;
 
+use common::font::read_japanese_font;
 use common::preview::Preview;
 
 use gueiz_2d::camera::Camera;
@@ -29,14 +30,10 @@ const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 /// これより明るければ「塗られている」とみなす。
 const LIT: u8 = 16;
 
-/// 手元にあるフォント。無ければ分かるように落とす。
-const FONT_PATH: &str = "C:/Windows/Fonts/arial.ttf";
-
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
-    let data = std::fs::read(FONT_PATH)
-        .map_err(|error| format!("{FONT_PATH} を読めませんでした: {error}"))?;
+    let (font_path, data) = read_japanese_font()?;
     let font = Font::from_bytes(&data)?;
 
     let instance_handle =
@@ -50,7 +47,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ..Default::default()
     }))?;
 
-    println!("font   : {FONT_PATH}");
+    println!("font   : {font_path}");
     println!("adapter: {}\n", adapter.get_info().name);
 
     let target = Target::new(&device);
@@ -428,10 +425,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     assert!(measured.ink_width() > measured.width, "斜体ははみ出すはず");
-    // 塗られる範囲で寄せれば欠けない。小数点以下の位置が違うと縁の
-    // 当たり方が 1 画素ぶん変わるので、そのぶんだけ許す。
+    // 塗られる範囲で寄せれば欠けない。まず、画面の端に触れていないこと。
+    // 触れていれば、そこで切れている。
+    let snug_bounds = bounds(&snug.pixels).expect("塗られている");
     assert!(
-        lit_count(&snug.pixels) + 4 >= lit_count(&whole.pixels),
+        snug_bounds.right < SIZE - 1 && snug_bounds.bottom < SIZE - 1,
+        "測って寄せたのに端に触れた: 右 {} / 下 {}",
+        snug_bounds.right,
+        snug_bounds.bottom,
+    );
+    // 画素の数でも見る。ただし均していないので、小数点以下の位置が違うだけで
+    // 縁の当たり方が変わる（游ゴシックの `Wg` で 16 画素ほど揺れた）。1% まで許す。
+    assert!(
+        lit_count(&snug.pixels) + lit_count(&whole.pixels) / 100 >= lit_count(&whole.pixels),
         "測って寄せたのに欠けた: {} < {}",
         lit_count(&snug.pixels),
         lit_count(&whole.pixels),

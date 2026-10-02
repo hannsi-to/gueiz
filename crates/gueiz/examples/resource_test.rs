@@ -17,6 +17,7 @@ mod common;
 
 use std::error::Error;
 
+use common::font::japanese_font_path;
 use common::preview::Preview;
 
 use gueiz_2d::camera::Camera;
@@ -33,7 +34,6 @@ use gueiz_2d::wgpu;
 
 const SIZE: u32 = 256;
 const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
-const FONT_PATH: &str = "C:/Windows/Fonts/arial.ttf";
 
 /// シート 1 層の大きさ。全面を緑にする。
 const SHEET: u32 = 8;
@@ -59,13 +59,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut resources = Resources::new();
 
     // 1. フォントを預ける。バイト列は置き場が持つので、呼ぶ側は取っ手だけ。
-    let arial = resources.load_font_file("arial", FONT_PATH)?;
-    println!("1. フォントを預ける           取っ手 {arial:?}");
-    assert!(resources.font(arial).is_some());
-    assert_eq!(resources.font_handle("arial"), Some(arial));
+    let font_path = japanese_font_path()?;
+    println!("   書体: {font_path}");
+    let japanese = resources.load_font_file("japanese", font_path)?;
+    println!("1. フォントを預ける           取っ手 {japanese:?}");
+    assert!(resources.font(japanese).is_some());
+    assert_eq!(resources.font_handle("japanese"), Some(japanese));
 
     // 2. 預けたフォントで描ける。
-    let pixels = draw_text(&device, &queue, &target, &resources, arial)?;
+    let pixels = draw_text(&device, &queue, &target, &resources, japanese)?;
     preview.capture("預けたフォントで描く", SIZE, SIZE, &pixels);
     let lit = lit_pixels(&pixels);
     println!("2. 預けたフォントで描く       塗り {lit} 画素");

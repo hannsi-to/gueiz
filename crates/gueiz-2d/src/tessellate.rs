@@ -6,6 +6,8 @@
 use std::f32::consts::PI;
 use std::ops::Range;
 
+use fxhash::FxHashMap;
+
 use crate::paint_type::{Dash, JointType, PaintType};
 use crate::vertex::Vertex;
 
@@ -31,6 +33,8 @@ pub fn tessellate(
 ) {
     match paint_type {
         PaintType::Fill => fill(outline, contour_starts, triangles),
+
+        PaintType::FillNonZero => fill_nonzero(outline, contour_starts, triangles),
 
         PaintType::Stroke {
             line_width,
@@ -936,6 +940,297 @@ fn push_index_fan(polygon: &[Vertex], indices: &[usize], triangles: &mut Vec<Ver
         triangles.push(polygon[indices[0]]);
         triangles.push(polygon[indices[position]]);
         triangles.push(polygon[indices[position + 1]]);
+    }
+}
+
+/// 輪郭の内側を**非ゼロ巻き数**で塗る。[`PaintType::FillNonZero`] の中身。
+///
+/// # 帯に割って塗る
+///
+/// 耳刈り取りは「1 本の単純な輪郭」しか潰せないので、重なりや交差は
+/// 扱えません。こちらは形を**横の帯**に割ります。
+///
+/// 1. 頂点の高さと、辺どうしの交点の高さで帯を区切る。
+///    **帯の中では辺が交わらない**ので、左から順に並べられる
+/// 2. 帯ごとに左から辺を数え、巻き数が 0 でない区間を拾う
+/// 3. 上の帯から同じ 2 辺で続く区間は 1 枚の台形にまとめる。
+///    まとめないと、別の場所の頂点で割られた細切れの台形が山ほど出る
+///
+/// 台形の数はおおむね辺の数に比例します。
+///
+/// # 継ぎ目
+///
+/// 上下に並んだ台形の幅が違うと、片方の角がもう片方の上辺の途中に乗ります
+/// （T 字の継ぎ目）。そのままだと上辺と下辺が辺として一致せず、
+/// [`crate::clip`] の距離場が中に境目を見てしまいます。
+/// そこで**同じ高さに乗っている角を上辺・下辺に差し込んでから**三角形にします。
+pub fn fill_nonzero(outline: &[Vertex], contour_starts: &[usize], triangles: &mut Vec<Vertex>) {
+    let edges = winding_edges(outline, contour_starts);
+
+    if edges.is_empty() {
+        return;
+    }
+
+    let levels = sweep_levels(&edges);
+    let trapezoids = sweep_trapezoids(&edges, &levels);
+
+    // 高さごとに、その高さに乗っている角の x を集める。
+    let mut corners: FxHashMap<u32, Vec<f32>> = FxHashMap::default();
+
+    for trapezoid in &trapezoids {
+        for y in [trapezoid.top, trapezoid.bottom] {
+            corners.entry(y.to_bits()).or_default().extend([
+                edges[trapezoid.left].at(y).x,
+                edges[trapezoid.right].at(y).x,
+            ]);
+        }
+    }
+
+    for xs in corners.values_mut() {
+        xs.sort_by(f32::total_cmp);
+        xs.dedup();
+    }
+
+    for trapezoid in &trapezoids {
+        let top = chain(&edges, trapezoid, trapezoid.top, &corners);
+        let bottom = chain(&edges, trapezoid, trapezoid.bottom, &corners);
+
+        zip_chains(&top, &bottom, triangles);
+    }
+}
+
+/// 巻き数を数えるための辺。**上の端を `top` に揃えてある。**
+#[derive(Clone, Copy, Debug)]
+struct WindingEdge {
+    top: Vertex,
+    bottom: Vertex,
+    /// 下向きに辿る辺なら +1、上向きなら -1。
+    winding: i32,
+}
+
+impl WindingEdge {
+    /// 高さ `y` での辺の上の点。色や uv も混ぜる。
+    ///
+    /// 端ちょうどなら端点そのものを返す。混ぜ算の丸めで端がずれると、
+    /// 隣の台形と角が合わなくなる。
+    fn at(&self, y: f32) -> Vertex {
+        if y <= self.top.y {
+            return self.top;
+        }
+
+        if y >= self.bottom.y {
+            return self.bottom;
+        }
+
+        let mut point = lerp_vertex(self.top, self.bottom, (y - self.top.y) / (self.bottom.y - self.top.y));
+        point.y = y;
+        point
+    }
+
+    fn min_x(&self) -> f32 {
+        self.top.x.min(self.bottom.x)
+    }
+
+    fn max_x(&self) -> f32 {
+        self.top.x.max(self.bottom.x)
+    }
+}
+
+/// 輪郭を辺に分ける。水平な辺は帯を横切らないので巻き数に効かず、要らない。
+fn winding_edges(outline: &[Vertex], contour_starts: &[usize]) -> Vec<WindingEdge> {
+    let mut edges = Vec::new();
+
+    for contour in contours(outline, contour_starts, 3, true) {
+        let count = contour.len();
+
+        for index in 0..count {
+            let from = contour[index];
+            let to = contour[(index + 1) % count];
+
+            if from.y < to.y {
+                edges.push(WindingEdge { top: from, bottom: to, winding: 1 });
+            } else if from.y > to.y {
+                edges.push(WindingEdge { top: to, bottom: from, winding: -1 });
+            }
+        }
+    }
+
+    edges
+}
+
+/// 帯の区切りの高さ。頂点の高さと、辺どうしが交わる高さ。昇順で重複なし。
+///
+/// 交点は x の範囲が重なる組だけ調べる。字を横に並べた文字列でも、
+/// 遠い字どうしは比べずに済む。
+fn sweep_levels(edges: &[WindingEdge]) -> Vec<f32> {
+    let mut levels: Vec<f32> = edges
+        .iter()
+        .flat_map(|edge| [edge.top.y, edge.bottom.y])
+        .collect();
+
+    let mut by_x: Vec<usize> = (0..edges.len()).collect();
+    by_x.sort_by(|a, b| edges[*a].min_x().total_cmp(&edges[*b].min_x()));
+
+    for (position, &first) in by_x.iter().enumerate() {
+        let a = edges[first];
+
+        for &second in &by_x[position + 1..] {
+            let b = edges[second];
+
+            if b.min_x() > a.max_x() {
+                break;
+            }
+
+            if b.top.y >= a.bottom.y || a.top.y >= b.bottom.y {
+                continue;
+            }
+
+            if let Some(y) = crossing_height(a, b) {
+                levels.push(y);
+            }
+        }
+    }
+
+    levels.sort_by(f32::total_cmp);
+    levels.dedup();
+    levels
+}
+
+/// 2 辺が**両方の内側で**交わるなら、その高さ。端で触れるだけなら `None`。
+fn crossing_height(a: WindingEdge, b: WindingEdge) -> Option<f32> {
+    let r = [a.bottom.x - a.top.x, a.bottom.y - a.top.y];
+    let s = [b.bottom.x - b.top.x, b.bottom.y - b.top.y];
+    let denominator = r[0] * s[1] - r[1] * s[0];
+
+    // 平行。重なっていても、同じ x に並ぶだけなので帯を割る必要は無い。
+    if denominator == 0.0 {
+        return None;
+    }
+
+    let offset = [b.top.x - a.top.x, b.top.y - a.top.y];
+    let t = (offset[0] * s[1] - offset[1] * s[0]) / denominator;
+    let u = (offset[0] * r[1] - offset[1] * r[0]) / denominator;
+
+    (t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0).then(|| a.top.y + t * r[1])
+}
+
+/// 塗る台形 1 枚。左右の辺と、上下の高さ。
+#[derive(Clone, Copy, Debug)]
+struct Trapezoid {
+    left: usize,
+    right: usize,
+    top: f32,
+    bottom: f32,
+}
+
+/// 帯を上から順に見て、塗る台形を拾う。
+fn sweep_trapezoids(edges: &[WindingEdge], levels: &[f32]) -> Vec<Trapezoid> {
+    let mut by_top: Vec<usize> = (0..edges.len()).collect();
+    by_top.sort_by(|a, b| edges[*a].top.y.total_cmp(&edges[*b].top.y));
+
+    let mut next = 0;
+    let mut active: Vec<usize> = Vec::new();
+    // 上の帯から続いている台形。下の端はまだ決まっていない。
+    let mut open: Vec<Trapezoid> = Vec::new();
+    let mut trapezoids = Vec::new();
+
+    for band in levels.windows(2) {
+        let (top, bottom) = (band[0], band[1]);
+
+        while next < by_top.len() && edges[by_top[next]].top.y <= top {
+            active.push(by_top[next]);
+            next += 1;
+        }
+
+        // 区切りには全頂点の高さが入っているので、ここで終わらない辺は帯を貫く。
+        active.retain(|&edge| edges[edge].bottom.y > top);
+
+        // 帯の中では辺が交わらないので、真ん中の高さで並べれば帯じゅうその順。
+        let middle = (top + bottom) * 0.5;
+        active.sort_by(|a, b| edges[*a].at(middle).x.total_cmp(&edges[*b].at(middle).x));
+
+        let mut still_open = Vec::with_capacity(open.len());
+        let mut winding = 0;
+        let mut left = None;
+
+        for &edge in &active {
+            let before = winding;
+            winding += edges[edge].winding;
+
+            if before == 0 && winding != 0 {
+                left = Some(edge);
+            } else if before != 0 && winding == 0 {
+                let left = left.take().expect("塗り始めの辺がある");
+
+                // 同じ 2 辺で上から続いているなら、伸ばすだけ。
+                let top = open
+                    .iter()
+                    .position(|span| span.left == left && span.right == edge)
+                    .map_or(top, |position| open.swap_remove(position).top);
+
+                still_open.push(Trapezoid { left, right: edge, top, bottom });
+            }
+        }
+
+        // 続かなかったものは、この帯の上で閉じる。
+        trapezoids.extend(open.drain(..).map(|span| Trapezoid { bottom: top, ..span }));
+        open = still_open;
+    }
+
+    trapezoids.extend(open);
+    trapezoids
+}
+
+/// 台形の上辺（または下辺）。左の角から右の角まで、途中に乗る角を差し込む。
+fn chain(
+    edges: &[WindingEdge],
+    trapezoid: &Trapezoid,
+    y: f32,
+    corners: &FxHashMap<u32, Vec<f32>>,
+) -> Vec<Vertex> {
+    let left = edges[trapezoid.left].at(y);
+    let right = edges[trapezoid.right].at(y);
+
+    let mut chain = vec![left];
+
+    if let Some(xs) = corners.get(&y.to_bits()) {
+        let width = right.x - left.x;
+
+        for &x in xs.iter().filter(|x| **x > left.x && **x < right.x) {
+            let mut point = lerp_vertex(left, right, (x - left.x) / width);
+            point.x = x;
+            point.y = y;
+            chain.push(point);
+        }
+    }
+
+    // 尖った先では左右の角が重なる。2 つ置くと面積の無い三角形ができ、
+    // 距離場が、そこで背中合わせになった辺を打ち消し合って境目を見落とす。
+    if !same_position(left, right) {
+        chain.push(right);
+    }
+
+    chain
+}
+
+/// 上辺と下辺を左から綴じて三角形にする。どちらも左から右へ並んでいる前提。
+///
+/// x の小さいほうを先に進めるので、細長い三角形になりにくい。
+fn zip_chains(top: &[Vertex], bottom: &[Vertex], triangles: &mut Vec<Vertex>) {
+    let (mut upper, mut lower) = (0, 0);
+
+    while upper + 1 < top.len() || lower + 1 < bottom.len() {
+        let advance_top = lower + 1 == bottom.len()
+            || (upper + 1 < top.len() && top[upper + 1].x <= bottom[lower + 1].x);
+
+        // 他の三角形と巻き方向を揃える（`cross` が正）。
+        if advance_top {
+            upper += 1;
+            triangles.extend([top[upper - 1], top[upper], bottom[lower]]);
+        } else {
+            lower += 1;
+            triangles.extend([top[upper], bottom[lower], bottom[lower - 1]]);
+        }
     }
 }
 
@@ -3122,5 +3417,359 @@ mod tests {
         assert!(!contains(&triangles, 15.0, 0.0), "空けたところに線がある");
         assert!(contains(&triangles, 25.0, 0.0), "2 本目の上");
         assert!(!contains(&triangles, 35.0, 0.0), "空けたところに線がある");
+    }
+
+    // --- 非ゼロ巻き数の塗り ---
+
+    /// 輪郭をつないで、区切りと一緒に返す。
+    fn joined(contours: &[&[Vertex]]) -> (Vec<Vertex>, Vec<usize>) {
+        let mut outline = Vec::new();
+        let mut starts = Vec::new();
+
+        for contour in contours {
+            starts.push(outline.len());
+            outline.extend_from_slice(contour);
+        }
+
+        (outline, starts)
+    }
+
+    fn filled_nonzero(contours: &[&[Vertex]]) -> Vec<Vertex> {
+        let (outline, starts) = joined(contours);
+        let mut triangles = Vec::new();
+        fill_nonzero(&outline, &starts, &mut triangles);
+
+        assert_triangle_list(&triangles);
+        triangles
+    }
+
+    /// 時計回りの正方形。`square` の逆向き。
+    fn square_clockwise(x: f32, y: f32, size: f32) -> [Vertex; 4] {
+        let mut corners = square(x, y, size);
+        corners.reverse();
+        corners
+    }
+
+    /// 答え合わせ用の巻き数。点から +X に線を飛ばし、向きつきで辺を数える。
+    fn winding_number(contours: &[&[Vertex]], point: Vertex) -> i32 {
+        let mut total = 0;
+
+        for contour in contours {
+            for index in 0..contour.len() {
+                let a = contour[index];
+                let b = contour[(index + 1) % contour.len()];
+
+                if (a.y <= point.y) != (b.y <= point.y) {
+                    let x = a.x + (point.y - a.y) / (b.y - a.y) * (b.x - a.x);
+
+                    if x > point.x {
+                        total += if b.y > a.y { 1 } else { -1 };
+                    }
+                }
+            }
+        }
+
+        total
+    }
+
+    /// 格子で、**巻き数が 0 でないところをちょうど 1 枚で覆っている**こと。
+    ///
+    /// 0 枚なら塗り残し、2 枚なら重ね塗り。格子は辺に乗らないよう半端にずらす。
+    fn assert_matches_winding(contours: &[&[Vertex]], triangles: &[Vertex], extent: f32) {
+        let steps = 60;
+
+        for row in 0..steps {
+            for column in 0..steps {
+                let at = point(
+                    (column as f32 + 0.5) / steps as f32 * extent + 0.0137,
+                    (row as f32 + 0.5) / steps as f32 * extent + 0.0291,
+                );
+
+                let expected = usize::from(winding_number(contours, at) != 0);
+
+                assert_eq!(
+                    coverage(triangles, at),
+                    expected,
+                    "({}, {}) の巻き数は {}",
+                    at.x,
+                    at.y,
+                    winding_number(contours, at),
+                );
+            }
+        }
+    }
+
+    /// **重なった 2 本の画は、重なりも塗る。** ここが今回の要点。
+    ///
+    /// 日本語のフォントは画ごとの輪郭を重ねて字を作ります。`十` なら横棒と
+    /// 縦棒の 2 本で、真ん中が重なる。包含の偶奇で塗るとここが抜けます。
+    #[test]
+    fn nonzero_fills_where_two_strokes_overlap() {
+        let horizontal = [point(0.0, 40.0), point(100.0, 40.0), point(100.0, 60.0), point(0.0, 60.0)];
+        let vertical = [point(40.0, 0.0), point(60.0, 0.0), point(60.0, 100.0), point(40.0, 100.0)];
+        let contours: [&[Vertex]; 2] = [&horizontal, &vertical];
+
+        let triangles = filled_nonzero(&contours);
+
+        assert_eq!(coverage(&triangles, point(50.3, 50.7)), 1, "重なりが抜けている");
+        // 和集合の面積。重なりを 2 回数えていないこと。
+        let area = total_area(&triangles);
+        assert!((area - (2000.0 + 2000.0 - 400.0)).abs() < 1e-2, "{area}");
+
+        assert_matches_winding(&contours, &triangles, 100.0);
+    }
+
+    /// 逆向きに巻いた内側の輪郭は穴になる。
+    #[test]
+    fn nonzero_cuts_a_hole_that_winds_the_other_way() {
+        let outer = square(0.0, 0.0, 90.0);
+        let hole = square_clockwise(30.0, 30.0, 30.0);
+        let contours: [&[Vertex]; 2] = [&outer, &hole];
+
+        let triangles = filled_nonzero(&contours);
+
+        assert_eq!(coverage(&triangles, point(45.3, 46.1)), 0);
+        let area = total_area(&triangles);
+        assert!((area - (90.0 * 90.0 - 30.0 * 30.0)).abs() < 1e-2, "{area}");
+
+        assert_matches_winding(&contours, &triangles, 90.0);
+    }
+
+    /// 同じ向きに巻いた内側の輪郭は穴ではない。**ここが `fill` と違う。**
+    #[test]
+    fn nonzero_fills_an_inner_contour_that_winds_the_same_way() {
+        let outer = square(0.0, 0.0, 90.0);
+        let inner = square(30.0, 30.0, 30.0);
+        let contours: [&[Vertex]; 2] = [&outer, &inner];
+
+        let triangles = filled_nonzero(&contours);
+
+        assert_eq!(coverage(&triangles, point(45.3, 46.1)), 1);
+        let area = total_area(&triangles);
+        assert!((area - 90.0 * 90.0).abs() < 1e-2, "{area}");
+
+        // 偶奇で塗る `fill` は、同じ形を穴にする。違いがここで出ていること。
+        let (outline, starts) = joined(&contours);
+        let mut even_odd = Vec::new();
+        fill(&outline, &starts, &mut even_odd);
+        assert_eq!(coverage(&even_odd, point(45.3, 46.1)), 0);
+    }
+
+    /// 自分と交わる輪郭も塗れる。五芒星の真ん中は 2 周囲まれているので塗る。
+    #[test]
+    fn nonzero_fills_the_middle_of_a_pentagram() {
+        let star: Vec<Vertex> = (0..5)
+            .map(|index| {
+                // 1 つ飛ばしに結ぶ。
+                let angle = (index * 2) as f32 * std::f32::consts::TAU / 5.0;
+                point(50.0 + 45.0 * angle.sin(), 50.0 - 45.0 * angle.cos())
+            })
+            .collect();
+        let contours: [&[Vertex]; 1] = [&star];
+
+        let triangles = filled_nonzero(&contours);
+
+        assert_eq!(winding_number(&contours, point(50.0, 50.0)).abs(), 2);
+        assert_eq!(coverage(&triangles, point(50.3, 50.7)), 1);
+
+        assert_matches_winding(&contours, &triangles, 100.0);
+    }
+
+    /// 向きの揃った三角形を出す。`fill` と同じ巻き（`cross` が正）。
+    #[test]
+    fn nonzero_triangles_wind_like_fill() {
+        let horizontal = square(0.0, 40.0, 60.0);
+        let vertical = square_clockwise(20.0, 0.0, 60.0);
+        let triangles = filled_nonzero(&[&horizontal, &vertical]);
+
+        assert!(!triangles.is_empty());
+
+        for corner in triangles.chunks_exact(3) {
+            assert!(cross(corner[0], corner[1], corner[2]) > 0.0, "{corner:?}");
+        }
+    }
+
+    /// 関係の無い頂点の高さで、形が細切れにならないこと。
+    ///
+    /// 帯は全頂点の高さで区切るので、そのまま台形にすると、隣の円の
+    /// 頂点の数だけ四角が割れます。同じ 2 辺で続くあいだはまとめる。
+    #[test]
+    fn unrelated_vertices_do_not_slice_a_shape() {
+        let rectangle = [point(0.0, 0.0), point(10.0, 0.0), point(10.0, 100.0), point(0.0, 100.0)];
+        let circle: Vec<Vertex> = (0..32)
+            .map(|index| {
+                let angle = index as f32 * std::f32::consts::TAU / 32.0;
+                point(60.0 + 30.0 * angle.cos(), 50.0 + 45.0 * angle.sin())
+            })
+            .collect();
+
+        let triangles = filled_nonzero(&[&rectangle, &circle]);
+
+        let in_rectangle = triangles
+            .chunks_exact(3)
+            .filter(|corner| corner.iter().all(|vertex| vertex.x <= 10.0))
+            .count();
+
+        assert_eq!(in_rectangle, 2, "四角が {in_rectangle} 枚に割れている");
+    }
+
+    /// **継ぎ目に T 字を残さない。** 幅の違う台形が上下に並ぶところ。
+    ///
+    /// 残すと、中で背中合わせになっている辺が一致せず、外周に見えてしまう。
+    /// 外周だけが 1 回ずつ出てくるなら、奇数回の辺の長さは周の長さと等しい。
+    #[test]
+    fn stacked_trapezoids_share_their_seams() {
+        // 凸の字。上が細く、下が広い。
+        let outline = [
+            point(30.0, 0.0),
+            point(70.0, 0.0),
+            point(70.0, 40.0),
+            point(100.0, 40.0),
+            point(100.0, 80.0),
+            point(0.0, 80.0),
+            point(0.0, 40.0),
+            point(30.0, 40.0),
+        ];
+
+        let triangles = filled_nonzero(&[&outline]);
+
+        let mut counts: Vec<((u64, u64), f32, u32)> = Vec::new();
+        let pack = |vertex: Vertex| ((vertex.x.to_bits() as u64) << 32) | vertex.y.to_bits() as u64;
+
+        for corner in triangles.chunks_exact(3) {
+            for step in 0..3 {
+                let (from, to) = (corner[step], corner[(step + 1) % 3]);
+                let (a, b) = (pack(from), pack(to));
+                let key = if a <= b { (a, b) } else { (b, a) };
+                let length = ((to.x - from.x).powi(2) + (to.y - from.y).powi(2)).sqrt();
+
+                match counts.iter_mut().find(|(seen, _, _)| *seen == key) {
+                    Some((_, _, count)) => *count += 1,
+                    None => counts.push((key, length, 1)),
+                }
+            }
+        }
+
+        let boundary: f32 = counts
+            .iter()
+            .filter(|(_, _, count)| count % 2 == 1)
+            .map(|(_, length, _)| length)
+            .sum();
+
+        // 40 + 40 + 30 + 40 + 100 + 40 + 30 + 40
+        assert!((boundary - 360.0).abs() < 1e-3, "外周の長さが {boundary}");
+    }
+
+    /// 尖った先で、面積の無い三角形を出さないこと。
+    #[test]
+    fn a_pointed_tip_makes_no_flat_triangles() {
+        let diamond = [point(50.0, 0.0), point(100.0, 50.0), point(50.0, 100.0), point(0.0, 50.0)];
+        let triangles = filled_nonzero(&[&diamond]);
+
+        assert!(!triangles.is_empty());
+
+        for corner in triangles.chunks_exact(3) {
+            assert!(
+                !same_position(corner[0], corner[1])
+                    && !same_position(corner[1], corner[2])
+                    && !same_position(corner[2], corner[0]),
+                "{corner:?}",
+            );
+        }
+    }
+
+    /// **角はちょうど入力の頂点に乗る。** 1 ulp もずらさない。
+    ///
+    /// 輪郭の 1 点は、上の辺の下端でもあり、下の辺の上端でもあります。
+    /// 下端を混ぜ算で出すと丸めで僅かにずれ、上端から出した点と食い違う。
+    /// すると継ぎ目が一致せず、すぐ隣に別の点が 2 つ並びます。
+    #[test]
+    fn corners_land_exactly_on_the_input_vertices() {
+        // 半端な座標の多角形。丸めが出やすい。
+        let polygon: Vec<Vertex> = (0..23)
+            .map(|index| {
+                let angle = index as f32 * std::f32::consts::TAU / 23.0 + 0.37;
+                let radius = if index % 2 == 0 { 41.3 } else { 29.7 };
+                point(50.13 + radius * angle.cos(), 50.71 + radius * angle.sin())
+            })
+            .collect();
+
+        // 0 のすぐそばの x も混ぜる。`1.0 + (3e-8 - 1.0)` は丸めで 0 になり、
+        // 3e-8 には戻らない。字形は em 単位なので、0 付近の座標はふつうに出る。
+        let notch = [
+            point(1.0, 0.0),
+            point(5.0, 0.0),
+            point(5.0, 2.0),
+            point(1.0, 2.0),
+            point(3e-8, 1.0),
+        ];
+
+        let mut triangles = filled_nonzero(&[&polygon]);
+        triangles.extend(filled_nonzero(&[&notch]));
+
+        for (index, a) in triangles.iter().enumerate() {
+            for b in &triangles[index + 1..] {
+                let apart = (a.x - b.x).abs().max((a.y - b.y).abs());
+
+                assert!(
+                    apart == 0.0 || apart > 1e-6,
+                    "({}, {}) と ({}, {}) がほとんど重なっている",
+                    a.x,
+                    a.y,
+                    b.x,
+                    b.y,
+                );
+            }
+        }
+    }
+
+    /// 帯で割って差し込んだ点の色は、辺の上で混ぜたものになる。
+    #[test]
+    fn nonzero_blends_colours_along_the_edges() {
+        // 上が白、下が黒。縦に色が変わる。
+        let shade = |x: f32, y: f32| {
+            let level = 1.0 - y / 100.0;
+            Vertex::new_position_color(x, y, 0.0, level, level, level, 1.0)
+        };
+        let first = [shade(0.0, 0.0), shade(60.0, 0.0), shade(60.0, 100.0), shade(0.0, 100.0)];
+        // 交わる斜めの形で、途中の高さに点を作らせる。
+        let second = [shade(30.0, 20.0), shade(90.0, 50.0), shade(30.0, 80.0)];
+
+        let triangles = filled_nonzero(&[&first, &second]);
+
+        for vertex in &triangles {
+            let expected = 1.0 - vertex.y / 100.0;
+            assert!(
+                (vertex.r - expected).abs() < 1e-4,
+                "({}, {}) の色 {}",
+                vertex.x,
+                vertex.y,
+                vertex.r,
+            );
+        }
+    }
+
+    /// 形にならない入力では何も出さない。
+    #[test]
+    fn nonzero_ignores_degenerate_input() {
+        let line = [point(0.0, 0.0), point(10.0, 10.0)];
+        let flat = [point(0.0, 0.0), point(10.0, 0.0), point(20.0, 0.0)];
+
+        assert!(filled_nonzero(&[]).is_empty());
+        assert!(filled_nonzero(&[&line]).is_empty());
+        assert!(filled_nonzero(&[&flat]).is_empty());
+    }
+
+    /// `tessellate` から呼べること。
+    #[test]
+    fn the_paint_type_selects_the_nonzero_fill() {
+        let outer = square(0.0, 0.0, 90.0);
+        let inner = square(30.0, 30.0, 30.0);
+        let (outline, starts) = joined(&[&outer, &inner]);
+
+        let mut triangles = Vec::new();
+        tessellate(&outline, &starts, PaintType::FillNonZero, &mut triangles);
+
+        assert_eq!(coverage(&triangles, point(45.3, 46.1)), 1);
     }
 }

@@ -21,6 +21,13 @@ impl Mat4 {
         ],
     };
 
+    /// 中身を列ごとに取り出す。**`columns[列][行]`。**
+    ///
+    /// 外から行列を確かめるときに要ります（試験や、計算の突き合わせ）。
+    pub const fn columns(self) -> [[f32; 4]; 4] {
+        self.columns
+    }
+
     pub const fn from_columns(columns: [[f32; 4]; 4]) -> Self {
         Self { columns }
     }
@@ -129,6 +136,36 @@ impl Mat4 {
                 [focal / aspect, 0.0, 0.0, 0.0],
                 [0.0, focal, 0.0, 0.0],
                 [0.0, 0.0, far * range, -1.0],
+                [0.0, 0.0, near * far * range, 0.0],
+            ],
+        }
+    }
+
+    /// **左右上下を別々に決める**透視投影。`perspective` の一般形。
+    ///
+    /// # 何に使うか
+    ///
+    /// 1 つの立体世界を**複数の画面で分けて映す**ときに要ります。画面ごとに
+    /// 近平面の一部だけを切り取れば、並べたときに 1 つの眺めとして繋がります。
+    ///
+    /// 左右・上下が釣り合っていれば [`Mat4::perspective`] と同じ行列になります。
+    ///
+    /// クリップ空間の z は wgpu に合わせて 0..1。
+    pub fn frustum(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Self {
+        let width = right - left;
+        let height = top - bottom;
+        let range = 1.0 / (near - far);
+
+        Self {
+            columns: [
+                [2.0 * near / width, 0.0, 0.0, 0.0],
+                [0.0, 2.0 * near / height, 0.0, 0.0],
+                [
+                    (right + left) / width,
+                    (top + bottom) / height,
+                    far * range,
+                    -1.0,
+                ],
                 [0.0, 0.0, near * far * range, 0.0],
             ],
         }
@@ -491,6 +528,32 @@ mod tests {
         for plane in projection.multiply(view).frustum_planes() {
             let length = (plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]).sqrt();
             assert!((length - 1.0).abs() < 1e-5, "{length}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod frustum_tests {
+    use super::*;
+
+    /// 左右上下が釣り合っていれば、画角から作った物と一致する。
+    ///
+    /// **ここが合わないと、1 画面のときに見え方が変わってしまう。**
+    #[test]
+    fn a_balanced_frustum_matches_the_plain_perspective() {
+        let (fov, aspect, near, far) = (0.9_f32, 16.0 / 9.0, 0.1, 100.0);
+
+        let top = near * (fov * 0.5).tan();
+        let right = top * aspect;
+
+        let plain = Mat4::perspective(fov, aspect, near, far);
+        let shaped = Mat4::frustum(-right, right, -top, top, near, far);
+
+        for column in 0..4 {
+            for row in 0..4 {
+                let difference = (plain.columns[column][row] - shaped.columns[column][row]).abs();
+                assert!(difference < 1e-5, "列 {column} 行 {row} が合わない");
+            }
         }
     }
 }

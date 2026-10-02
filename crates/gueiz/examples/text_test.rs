@@ -18,6 +18,7 @@ mod common;
 
 use std::error::Error;
 
+use common::font::read_japanese_font;
 use common::preview::Preview;
 
 use gueiz_2d::camera::Camera;
@@ -31,17 +32,14 @@ use gueiz_2d::wgpu;
 const SIZE: u32 = 256;
 const FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
-/// 手元にあるフォント。無ければ分かるように落とす。
-const FONT_PATH: &str = "C:/Windows/Fonts/arial.ttf";
-
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
-    let data = std::fs::read(FONT_PATH)
-        .map_err(|error| format!("{FONT_PATH} を読めませんでした: {error}"))?;
+    // 日本語の書体を使う。英字も持っているので、下の検証はそのまま通る。
+    let (font_path, data) = read_japanese_font()?;
     let font = Font::from_bytes(&data)?;
 
-    println!("font   : {FONT_PATH}");
+    println!("font   : {font_path}");
     println!(
         "metrics: ascender {:.3} em, descender {:.3} em, line {:.3} em\n",
         font.ascender(),

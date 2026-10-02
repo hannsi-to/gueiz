@@ -11,4 +11,5 @@
 //! cargo run -p gueiz --example text_test -- --window  # 結果を目で見る
 //! ```
 
+pub mod font;
 pub mod preview;
