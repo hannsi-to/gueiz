@@ -224,17 +224,37 @@ impl OutlineFlattener {
 
     fn push(&mut self, point: [f32; 2]) {
         // 同じ場所が続くと、長さ 0 の辺になってテッセレータを困らせる。
-        if let Some(last) = self.points.last() {
-            let dx = point[0] - last[0];
-            let dy = point[1] - last[1];
+        if self.points.last().is_some_and(|last| same_place(point, *last)) {
+            return;
+        }
 
-            if dx * dx + dy * dy < 1e-14 {
-                return;
-            }
+        // **いまの輪郭の 1 点目とも比べる。**
+        //
+        // 字形の輪郭は `line_to` で始点に戻って閉じるので、最後の点が
+        // 1 点目と同じになります。直前の点しか見ないと、これだけが生き残ります。
+        // 輪郭は閉じたものとして扱う（`(index + 1) % count`）ので、
+        // 残ると 1 点目と最後の点のあいだに長さ 0 の辺ができます。
+        //
+        // これで `面` や `B` の三角形分割が詰まっていました。
+        // [`crate::tessellate::fill`] 側でも畳みますが、**持ち出す前に
+        // 落としておきます**。輪郭を直に見る呼ぶ側（`gui` の文字描画など）が
+        // 同じ落とし穴を踏まないようにです。
+        if self
+            .current_start()
+            .is_some_and(|first| same_place(point, first))
+        {
+            return;
         }
 
         self.points.push(point);
         self.current = point;
+    }
+
+    /// いま積んでいる輪郭の 1 点目。輪郭がまだ無ければ `None`。
+    fn current_start(&self) -> Option<[f32; 2]> {
+        let start = *self.contour_starts.last()?;
+
+        self.points.get(start).copied()
     }
 
     fn finish(mut self) -> Option<GlyphOutline> {
@@ -328,6 +348,17 @@ impl OutlineBuilder for OutlineFlattener {
     }
 }
 
+/// 2 点が同じ場所か。
+///
+/// 距離の 2 乗で見る。`1e-14` は em 単位（1.0 = 1 em）で 1/10000000 em 相当。
+/// 字形が意図して置く点より細かいので、形を変えずに重複だけ落とせる。
+fn same_place(left: [f32; 2], right: [f32; 2]) -> bool {
+    let dx = left[0] - right[0];
+    let dy = left[1] - right[1];
+
+    dx * dx + dy * dy < 1e-14
+}
+
 /// 2 次ベジェを何本の直線に割るか。
 ///
 /// 2 階微分は一定で `2|p0 - 2p1 + p2|`。`n` 等分したときの弦からのずれは
@@ -396,6 +427,102 @@ fn cubic_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 字形と同じ順で輪郭を 1 本積む。最後に 1 点目へ戻って閉じる。
+    fn traced_square() -> GlyphOutline {
+        // `to_em` を 1 にして、座標をそのまま見られるようにする。
+        let mut flattener = OutlineFlattener::new(1.0, DEFAULT_TOLERANCE);
+
+        flattener.move_to(0.0, 0.0);
+        flattener.line_to(10.0, 0.0);
+        flattener.line_to(10.0, 10.0);
+        flattener.line_to(0.0, 10.0);
+        // ここが落とし穴。字形は 1 点目に戻る `line_to` を打ってから閉じる。
+        flattener.line_to(0.0, 0.0);
+        flattener.close();
+
+        flattener.finish().expect("形がある")
+    }
+
+    /// **1 点目に戻る点を落とすこと。**
+    ///
+    /// 輪郭は閉じたものとして扱われるので、1 点目と同じ最後の点は長さ 0 の
+    /// 辺になります。残すと三角形分割が詰まります（`面` や `B` がそうでした）。
+    #[test]
+    fn the_point_that_closes_a_contour_is_dropped() {
+        let outline = traced_square();
+
+        assert_eq!(outline.points.len(), 4, "{:?}", outline.points);
+        assert_eq!(outline.contour_count(), 1);
+        assert_ne!(
+            outline.points[0], outline.points[3],
+            "1 点目と最後の点が同じまま残っている"
+        );
+    }
+
+    /// 輪郭が 2 本あっても、それぞれの 1 点目と比べること。
+    ///
+    /// 直前の点としか比べないと、2 本目の閉じる点が生き残ります。
+    #[test]
+    fn every_contour_drops_its_own_closing_point() {
+        let mut flattener = OutlineFlattener::new(1.0, DEFAULT_TOLERANCE);
+
+        for offset in [0.0, 100.0] {
+            flattener.move_to(offset, 0.0);
+            flattener.line_to(offset + 10.0, 0.0);
+            flattener.line_to(offset + 10.0, 10.0);
+            flattener.line_to(offset, 10.0);
+            flattener.line_to(offset, 0.0);
+            flattener.close();
+        }
+
+        let outline = flattener.finish().expect("形がある");
+
+        assert_eq!(outline.contour_count(), 2);
+        assert_eq!(outline.points.len(), 8, "{:?}", outline.points);
+        assert_eq!(outline.contour_starts, vec![0, 4]);
+    }
+
+    /// 同じ場所に続く点も落ちること。こちらは前からでも落ちる。
+    #[test]
+    fn repeated_points_are_dropped_too() {
+        let mut flattener = OutlineFlattener::new(1.0, DEFAULT_TOLERANCE);
+
+        flattener.move_to(0.0, 0.0);
+        flattener.line_to(0.0, 0.0);
+        flattener.line_to(10.0, 0.0);
+        flattener.line_to(10.0, 0.0);
+        flattener.line_to(10.0, 10.0);
+        flattener.close();
+
+        let outline = flattener.finish().expect("形がある");
+
+        assert_eq!(outline.points.len(), 3, "{:?}", outline.points);
+    }
+
+    /// 輪郭の 1 点目は、前の輪郭の終点と重なっていても残すこと。
+    ///
+    /// 別の輪郭の点なので、落とすと 2 本目が 1 点足りなくなります。
+    #[test]
+    fn a_new_contour_keeps_its_first_point() {
+        let mut flattener = OutlineFlattener::new(1.0, DEFAULT_TOLERANCE);
+
+        flattener.move_to(0.0, 0.0);
+        flattener.line_to(10.0, 0.0);
+        flattener.line_to(10.0, 10.0);
+        flattener.close();
+
+        // 前の輪郭の終点と同じ場所から始める。
+        flattener.move_to(10.0, 10.0);
+        flattener.line_to(20.0, 10.0);
+        flattener.line_to(20.0, 20.0);
+        flattener.close();
+
+        let outline = flattener.finish().expect("形がある");
+
+        assert_eq!(outline.contour_count(), 2);
+        assert_eq!(outline.points.len(), 6, "{:?}", outline.points);
+    }
 
     /// 折れ線が本物の曲線からどれだけ離れているか。
     ///

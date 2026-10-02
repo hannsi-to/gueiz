@@ -19,6 +19,7 @@ pub mod draw_manager;
 pub mod instance;
 pub mod object;
 pub mod objects;
+pub mod gui;
 
 // 共通層。`crate::buffer` のような書き方がそのまま通る。
 pub use gueiz_gpu::{

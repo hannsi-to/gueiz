@@ -39,9 +39,13 @@ pub fn tessellate(
             dash,
         } => {
             // 線は輪郭ごとに独立して引く。穴の縁にも同じ太さの線が付く。
-            for range in contour_ranges(outline, contour_starts, 2) {
+            //
+            // 塗りと同じく長さ 0 の辺を落とす。残すと法線が出せず、
+            // その継ぎ目だけ帯が飛ぶ。閉じた輪のときだけ末尾の重複も落とす
+            // （開いた折れ線では、始点に戻る線分は消してはいけない）。
+            for contour in contours(outline, contour_starts, 2, !strip) {
                 let Some(dash) = dash else {
-                    stroke(&outline[range], line_width, joint_type, strip, triangles);
+                    stroke(&contour, line_width, joint_type, strip, triangles);
                     continue;
                 };
 
@@ -56,7 +60,7 @@ pub fn tessellate(
                     joint_type
                 };
 
-                for run in dash_runs(&outline[range], strip, dash) {
+                for run in dash_runs(&contour, strip, dash) {
                     stroke(&run, line_width, ends, true, triangles);
                 }
             }
@@ -79,10 +83,9 @@ pub fn tessellate(
 /// 正しく塗るには辺どうしの交点を求めて輪郭を切り直す必要があり、
 /// それは耳刈り取りとは別の仕組みになる。
 pub fn fill(outline: &[Vertex], contour_starts: &[usize], triangles: &mut Vec<Vertex>) {
-    let contours: Vec<Vec<Vertex>> = contour_ranges(outline, contour_starts, 3)
-        .into_iter()
-        .map(|range| outline[range].to_vec())
-        .collect();
+    // 長さ 0 の辺を落としてから数える。落とすと 3 点を切る輪郭があるので、
+    // 先に数えて捨ててしまうと「畳めば形になる輪郭」を取り落とす。
+    let contours = contours(outline, contour_starts, 3, true);
 
     if contours.is_empty() {
         return;
@@ -91,8 +94,28 @@ pub fn fill(outline: &[Vertex], contour_starts: &[usize], triangles: &mut Vec<Ve
     // どれが外周でどれが穴かは、**包含関係から決める**。
     // 順番で決め打つと、`i` や `=` のように離れた輪郭が 2 つある形で
     // 片方が穴にされて消える。
+    // つなげなかった穴。**捨てずに、それぞれ単独で塗る。**
+    let mut stray = Vec::new();
+
     for group in group_contours(&contours) {
-        fill_group(&contours, &group, triangles);
+        fill_group(&contours, &group, triangles, &mut stray);
+    }
+
+    // つなげないということは、外周の中に無かったということです。
+    // 包含関係の判定は輪郭の 1 点だけで見るので、**重なっているだけの輪郭**を
+    // 穴と取り違えることがあります。`Ç` の下の飾りや `Å` の上の輪は、
+    // 本体と少しだけ重なった別の形で、穴ではありません。
+    //
+    // 取り違えたまま捨てると飾りが消えます。単独で塗れば、本体と重なるぶんは
+    // 二重に塗られますが、1 色の形なら見た目は正しく出ます。
+    for index in stray {
+        let mut polygon = contours[index].clone();
+
+        if signed_area(&polygon) < 0.0 {
+            polygon.reverse();
+        }
+
+        ear_clip(&polygon, triangles);
     }
 }
 
@@ -180,7 +203,14 @@ fn group_contours(contours: &[Vec<Vertex>]) -> Vec<ContourGroup> {
 }
 
 /// 外周 1 つとその穴を 1 枚の多角形に畳んで、三角形に開く。
-fn fill_group(contours: &[Vec<Vertex>], group: &ContourGroup, triangles: &mut Vec<Vertex>) {
+///
+/// つなげなかった穴の番号を `stray` に積む。呼ぶ側が単独で塗り直す。
+fn fill_group(
+    contours: &[Vec<Vertex>],
+    group: &ContourGroup,
+    triangles: &mut Vec<Vertex>,
+    stray: &mut Vec<usize>,
+) {
     let mut polygon = contours[group.outer].clone();
 
     // 巻き方向はユーザーに要求しない。外周を反時計回りに、穴をその逆に揃える。
@@ -189,23 +219,25 @@ fn fill_group(contours: &[Vec<Vertex>], group: &ContourGroup, triangles: &mut Ve
         polygon.reverse();
     }
 
-    let mut holes: Vec<Vec<Vertex>> = group
+    let mut holes: Vec<(usize, Vec<Vertex>)> = group
         .holes
         .iter()
-        .map(|&index| contours[index].clone())
+        .map(|&index| (index, contours[index].clone()))
         .collect();
 
-    for hole in &mut holes {
+    for (_, hole) in &mut holes {
         if signed_area(hole) > 0.0 {
             hole.reverse();
         }
     }
 
     // 右にある穴から順につなぐ。先につないだ通路が後の探索を邪魔しない。
-    holes.sort_by(|a, b| rightmost_x(b).total_cmp(&rightmost_x(a)));
+    holes.sort_by(|(_, a), (_, b)| rightmost_x(b).total_cmp(&rightmost_x(a)));
 
-    for hole in &holes {
-        bridge_hole(&mut polygon, hole);
+    for (index, hole) in &holes {
+        if !bridge_hole(&mut polygon, hole) {
+            stray.push(*index);
+        }
     }
 
     ear_clip(&polygon, triangles);
@@ -246,6 +278,9 @@ fn contour_contains(contour: &[Vertex], point: Vertex) -> bool {
 }
 
 /// 輪郭の区切りを範囲に直す。`minimum` 頂点に満たない輪郭は落とす。
+///
+/// 点を落とさないので、[`contours`] と違って**写しを作りません**。
+/// 長さ 0 の辺が混じっていても気にしない処理だけがこちらを使います。
 fn contour_ranges(
     outline: &[Vertex],
     contour_starts: &[usize],
@@ -268,6 +303,81 @@ fn contour_ranges(
     }
 
     ranges
+}
+
+/// 輪郭を 1 本ずつ取り出して、**長さ 0 の辺を落とす**。
+///
+/// # なぜ落とすのか
+///
+/// ここから下は輪郭を暗黙に閉じて扱う（`(index + 1) % count`）ので、
+/// 同じ場所に 2 つ点があると長さ 0 の辺ができます。耳刈り取りはその辺を
+/// 潰せず、面積 0 の三角形を耳と認めないので、**耳が 1 つも見つからない
+/// 状態に落ちることがあります。**
+///
+/// # 1 点目と同じ末尾の点
+///
+/// 字形の輪郭は**最後の点が 1 点目と同じ**です
+/// （`line_to` で始点に戻って閉じる）。ここが今回の落とし穴でした。
+///
+/// - 連続する重複は前から順に見れば落ちる
+/// - **末尾が 1 点目と同じ**ものは、直前の点とは違うので前から見ても落ちない
+///
+/// 外周と穴の両方にこれが残り、かつ穴が 2 つ以上あると、穴をつないだあとの
+/// 輪郭で耳が見つからなくなって `面` や `B` が崩れていました。
+///
+/// # 閉じている輪郭だけ
+///
+/// `closed` を倒すと末尾の重複を残します。開いた折れ線
+/// （[`PaintType::Stroke`] の `strip`）では、始点に戻る最後の点は
+/// **消してはいけない線分**だからです。落とすと一辺足りない線になります。
+fn contours(
+    outline: &[Vertex],
+    contour_starts: &[usize],
+    minimum: usize,
+    closed: bool,
+) -> Vec<Vec<Vertex>> {
+    // 区切りだけ先に出す。点を落とすと数が変わるので、`minimum` は後で見る。
+    contour_ranges(outline, contour_starts, 1)
+        .into_iter()
+        .map(|range| dedup_contour(&outline[range], closed))
+        .filter(|contour| contour.len() >= minimum)
+        .collect()
+}
+
+/// 同じ場所に続く点を 1 つに畳む。`closed` なら 1 点目と同じ末尾も落とす。
+fn dedup_contour(contour: &[Vertex], closed: bool) -> Vec<Vertex> {
+    let mut kept: Vec<Vertex> = Vec::with_capacity(contour.len());
+
+    for &vertex in contour {
+        if kept.last().is_some_and(|last| same_place(*last, vertex)) {
+            continue;
+        }
+
+        kept.push(vertex);
+    }
+
+    // 閉じた輪郭なら、1 点目へ戻る点は辺を 1 本も増やさない。
+    // 畳んだ結果が 2 点以下になるものは残しても形にならないので、そのまま返す。
+    while closed
+        && kept.len() > 1
+        && same_place(kept[0], *kept.last().expect("空ではない"))
+    {
+        kept.pop();
+    }
+
+    kept
+}
+
+/// 2 点が同じ場所か。
+///
+/// 距離の 2 乗で見る。`1e-12` は em 単位（1.0 = 1 em）で 1/1000000 em
+/// 相当なので、字形の折れ線が意図して置く点より細かい。
+/// 画素座標で使っても、1 画素の百万分の 1 より近い点しか畳まない。
+fn same_place(left: Vertex, right: Vertex) -> bool {
+    let dx = left.x - right.x;
+    let dy = left.y - right.y;
+
+    dx * dx + dy * dy < 1e-12
 }
 
 /// 多角形の符号付き面積。正なら反時計回り。
@@ -369,7 +479,10 @@ fn same_position(a: Vertex, b: Vertex) -> bool {
 /// ```
 ///
 /// `P` と `M` が 2 回ずつ現れ、行きと帰りで打ち消し合うので面積は増えない。
-fn bridge_hole(polygon: &mut Vec<Vertex>, hole: &[Vertex]) {
+///
+/// つなげたら `true`。つなげないのは、その輪郭が外周の中に無いときです
+/// （[`fill`] が単独で塗り直します）。
+fn bridge_hole(polygon: &mut Vec<Vertex>, hole: &[Vertex]) -> bool {
     let Some(hole_index) = (0..hole.len()).reduce(|best, index| {
         if hole[index].x > hole[best].x {
             index
@@ -377,13 +490,12 @@ fn bridge_hole(polygon: &mut Vec<Vertex>, hole: &[Vertex]) {
             best
         }
     }) else {
-        return;
+        return false;
     };
 
-    let Some(bridge_index) = find_bridge_vertex(polygon, hole[hole_index]) else {
-        // つなぎ先が見つからない。穴を諦めて外周だけ塗る。
-        log::warn!("a hole could not be bridged to the outline; it will not be cut out");
-        return;
+    let Some(bridge_index) = open_bridge(polygon, hole[hole_index]) else {
+        // 右に外周が無い。この輪郭は穴ではなく、重なっているだけの別の形。
+        return false;
     };
 
     let mut spliced = Vec::with_capacity(polygon.len() + hole.len() + 2);
@@ -394,21 +506,46 @@ fn bridge_hole(polygon: &mut Vec<Vertex>, hole: &[Vertex]) {
     spliced.extend_from_slice(&polygon[bridge_index..]);
 
     *polygon = spliced;
+
+    true
 }
 
-/// 穴の右端から +X に線を飛ばし、そこから見える外周の頂点を探す。
-fn find_bridge_vertex(polygon: &[Vertex], from: Vertex) -> Option<usize> {
+/// 穴の右端から +X に線を飛ばし、**当たった点そのものを外周に差し込んで**
+/// 通路の行き先にする。差し込んだ位置を返す。
+///
+/// # なぜ頂点に寄せないのか
+///
+/// 以前は「当たった辺の、より右にある端点」へ寄せていました。これだと
+/// **当たった高さが無視される**ので、縦の辺に複数の穴が当たったとき、
+/// どの穴も同じ頂点へつながります。
+///
+/// ```text
+///   穴A ─→│        3 本の通路が 1 つの頂点に集まり、
+///   穴B ─→│  ←同じ縦の辺   行きと帰りが互いを跨いでしまう
+///   穴C ─→│
+/// ```
+///
+/// 通路が交差した輪郭には耳が 1 つも無く、`ear clipping stalled` で崩れます。
+/// 游ゴシックの `面`（縦に並んだ穴 3 つの右に別の穴）や Arial の `B` が
+/// これでした。
+///
+/// 当たった点を辺の上に差し込めば、穴ごとに**別の点**へつながります。
+/// 差し込む点は辺の上なので形は変わらず、通路は高さ順に並ぶので交差しません。
+/// 線が最初に当たる辺を選んでいるので、穴の右端からその点までのあいだに
+/// 外周はありません（**見えていることが保証されている**）。
+/// 寄せる先を探す必要が無くなったので、凹んだ頂点を避ける手当ても消えました。
+fn open_bridge(polygon: &mut Vec<Vertex>, from: Vertex) -> Option<usize> {
     let count = polygon.len();
 
-    // 1. 線が最初に当たる辺を探す。
-    let mut hit_x = f32::INFINITY;
-    let mut hit_edge = None;
+    // 線が最初に当たる辺を探す。
+    let mut hit = None;
 
     for index in 0..count {
         let start = polygon[index];
         let end = polygon[(index + 1) % count];
 
         // 辺が from.y をまたがなければ当たらない。
+        // 長さ 0 の辺（先につないだ通路の継ぎ目）もここで落ちる。
         if (start.y > from.y) == (end.y > from.y) {
             continue;
         }
@@ -416,77 +553,57 @@ fn find_bridge_vertex(polygon: &[Vertex], from: Vertex) -> Option<usize> {
         let ratio = (from.y - start.y) / (end.y - start.y);
         let x = start.x + ratio * (end.x - start.x);
 
-        if x > from.x && x < hit_x {
-            hit_x = x;
-            hit_edge = Some(index);
+        if x > from.x && hit.is_none_or(|(_, hit_x, _)| x < hit_x) {
+            hit = Some((index, x, ratio));
         }
     }
 
-    let edge = hit_edge?;
-
-    // 2. その辺の、より右にある端点をひとまずの候補にする。
+    let (edge, hit_x, ratio) = hit?;
     let next_edge = (edge + 1) % count;
-    // 同じ x なら手前（辺の始点）を採る。遠い頂点へつなぐと通路が長くなり、
-    // 後から来る穴の通路と交差しやすくなる。
-    let mut best = if polygon[edge].x >= polygon[next_edge].x {
-        edge
-    } else {
-        next_edge
-    };
 
-    // 3. 「穴の右端・線の当たった点・候補」が作る三角形の中に凹んだ頂点が
-    //    入っていると、そこを通る通路は外周を横切ってしまう。入っているものの
-    //    うち、線にいちばん近いものへ乗り換える。
-    let hit = {
-        let mut point = from;
-        point.x = hit_x;
-        point
-    };
+    // 当たった点。色や uv は辺の上で混ぜる。端点の値をそのまま使うと、
+    // 差し込んだところで色が飛ぶ。
+    let mut point = lerp_vertex(polygon[edge], polygon[next_edge], ratio);
+    // x は混ぜた値ではなく、交点の計算結果をそのまま入れる。
+    // 混ぜ算の丸めで辺から僅かに外れると、通路が外へ出る。
+    point.x = hit_x;
+    point.y = from.y;
 
-    let mut best_tangent = f32::INFINITY;
-
-    for index in 0..count {
-        if index == best {
-            continue;
-        }
-
-        let vertex = polygon[index];
-        if vertex.x < from.x {
-            continue;
-        }
-
-        // 凸な頂点は通路を塞がない。凹んだ頂点だけを見る。
-        let previous = polygon[(index + count - 1) % count];
-        let next = polygon[(index + 1) % count];
-        if cross(previous, vertex, next) > 0.0 {
-            continue;
-        }
-
-        // 辺の上も数える。穴どうしが同じ高さに並ぶと、塞いでいる頂点が
-        // ちょうど線の上に乗る。ここを見逃すと通路が別の穴を突き抜ける。
-        // 候補が線の上下どちらにあるかで三角形の向きが変わるので両方試す。
-        let inside = point_in_triangle_inclusive(from, hit, polygon[best], vertex)
-            || point_in_triangle_inclusive(polygon[best], hit, from, vertex);
-        if !inside {
-            continue;
-        }
-
-        let run = vertex.x - from.x;
-        let tangent = if run > 0.0 {
-            (vertex.y - from.y).abs() / run
-        } else {
-            f32::INFINITY
-        };
-
-        // 線に近いものを採る。同じ角度なら近いほうへ。通路は短いほど、
-        // 後から来る穴の通路と交差しにくい。
-        if tangent < best_tangent || (tangent == best_tangent && vertex.x < polygon[best].x) {
-            best_tangent = tangent;
-            best = index;
-        }
+    // ちょうど端点に当たったなら差し込まない。同じ場所に 2 つ置くと
+    // 長さ 0 の辺になり、いま直したばかりの詰まりに戻る。
+    if same_place(polygon[edge], point) {
+        return Some(edge);
     }
 
-    Some(best)
+    if same_place(polygon[next_edge], point) {
+        return Some(next_edge);
+    }
+
+    // 辺の途中に差し込む。`edge` が末尾なら、末尾に足すのが「末尾と先頭の
+    // あいだ」になる。
+    polygon.insert(edge + 1, point);
+
+    Some(edge + 1)
+}
+
+/// 2 点のあいだを混ぜる。位置だけでなく色や uv も混ぜる。
+fn lerp_vertex(start: Vertex, end: Vertex, ratio: f32) -> Vertex {
+    let mix = |a: f32, b: f32| a + (b - a) * ratio;
+
+    Vertex::new_position_color_uv_normal(
+        mix(start.x, end.x),
+        mix(start.y, end.y),
+        mix(start.z, end.z),
+        mix(start.r, end.r),
+        mix(start.g, end.g),
+        mix(start.b, end.b),
+        mix(start.a, end.a),
+        mix(start.u, end.u),
+        mix(start.v, end.v),
+        mix(start.n_x, end.n_x),
+        mix(start.n_y, end.n_y),
+        mix(start.n_z, end.n_z),
+    )
 }
 
 /// 割りすぎを止める。各段で輪郭は必ず 1 頂点以上短くなるので必ず終わるが、
@@ -2275,7 +2392,12 @@ mod tests {
         assert_eq!(coverage(&triangles, outside), 0, "窪みが塗られている");
     }
 
-    /// 穴 1 つにつき頂点が 2 つ増える（通路の行き帰り）。三角形の数はそこから決まる。
+    /// 穴 1 つにつき頂点が 3 つ増える。三角形の数はそこから決まる。
+    ///
+    /// 増えるのは**通路の行き帰りで 2 つ**と、**外周に差し込む接続点で 1 つ**です。
+    /// 接続点は [`open_bridge`] が辺の上に置くもので、形は変わりませんが
+    /// 頂点は 1 つ増えます（穴ごとに別の点へつなぐため。詳しくは
+    /// [`open_bridge`] の注釈）。
     #[test]
     fn the_triangle_count_follows_from_the_contours() {
         let mut outline = Vec::new();
@@ -2285,8 +2407,287 @@ mod tests {
         let mut triangles = Vec::new();
         fill(&outline, &[0, 4], &mut triangles);
 
-        // 頂点 4 + 4 + 通路 2 = 10 → 三角形 8 枚。
-        assert_eq!(triangles.len(), 3 * (4 + 4 + 2 - 2));
+        // 頂点 4 + 4 + 通路 2 + 接続点 1 = 11 → 三角形 9 枚。
+        assert_eq!(triangles.len(), 3 * (4 + 4 + 2 + 1 - 2));
+    }
+
+    // --- 字形の輪郭で踏んだ 2 つの詰まり ---
+
+    /// 1 点目を末尾でもう一度打つ。字形の輪郭と同じ形にする。
+    fn closed_ring(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
+        let mut points = points.to_vec();
+        points.push(points[0]);
+
+        points
+    }
+
+    /// 輪郭を 1 本につないで塗る。
+    fn filled_contours(contours: &[Vec<(f32, f32)>]) -> Vec<Vertex> {
+        let mut points = Vec::new();
+        let mut starts = Vec::new();
+
+        for contour in contours {
+            starts.push(points.len());
+            points.extend_from_slice(&to_vertices(contour));
+        }
+
+        let mut triangles = Vec::new();
+        fill(&points, &starts, &mut triangles);
+
+        triangles
+    }
+
+    /// 格子で数えて、穴が抜けていて重ね塗りが無いことを見る。
+    ///
+    /// 1 点だけ名指しで見ると、そこがたまたま三角形の辺の上に乗っていて
+    /// 「塗られていない」と出ることがあります（[`coverage`] は開いた三角形で
+    /// 判定するため）。格子で舐めて、**穴の中は必ず 0、外は 1 枚まで**を見ます。
+    /// 塗り残しが無いことは面積で別に見ます。
+    fn assert_holes_are_clean(triangles: &[Vertex], side: f32, holes: &[(f32, f32, f32, f32)]) {
+        let mut inside_hole = 0;
+        let mut y = 0.5;
+
+        while y < side {
+            let mut x = 0.5;
+
+            while x < side {
+                let in_hole = holes.iter().any(|&(left, top, right, bottom)| {
+                    x > left && x < right && y > top && y < bottom
+                });
+
+                let covered = coverage(triangles, point(x, y));
+
+                if in_hole {
+                    assert_eq!(covered, 0, "穴の中 ({x}, {y}) が塗られている");
+                    inside_hole += 1;
+                } else {
+                    assert!(covered <= 1, "({x}, {y}) が {covered} 枚に重ね塗りされている");
+                }
+
+                x += 1.0;
+            }
+
+            y += 1.0;
+        }
+
+        assert!(inside_hole > 0, "穴の中を 1 点も見ていない");
+    }
+
+    /// **1 点目と同じ末尾の点があっても塗れること。**
+    ///
+    /// 字形の輪郭は `line_to` で始点に戻って閉じるので、最後の点が 1 点目と
+    /// 同じになります。輪郭は閉じたものとして扱うので、これは長さ 0 の辺です。
+    /// 残すと耳刈り取りが詰まり、外周と穴の両方に残っていて穴が 2 つ以上あると
+    /// 形が崩れていました（[`dedup_contour`]）。
+    #[test]
+    fn a_duplicate_closing_point_does_not_break_two_holes() {
+        let outer = closed_ring(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        let lower = closed_ring(&[(20.0, 20.0), (80.0, 20.0), (80.0, 40.0), (20.0, 40.0)]);
+        let upper = closed_ring(&[(20.0, 60.0), (80.0, 60.0), (80.0, 80.0), (20.0, 80.0)]);
+
+        let triangles = filled_contours(&[outer, lower, upper]);
+
+        assert_triangle_list(&triangles);
+
+        // 100 x 100 から 60 x 20 の穴 2 つを抜いた面積。
+        let expected = 100.0 * 100.0 - 2.0 * 60.0 * 20.0;
+        assert!(
+            (total_area(&triangles) - expected).abs() < 1e-2,
+            "{} vs {expected}",
+            total_area(&triangles),
+        );
+
+        assert_holes_are_clean(
+            &triangles,
+            100.0,
+            &[(20.0, 20.0, 80.0, 40.0), (20.0, 60.0, 80.0, 80.0)],
+        );
+    }
+
+    /// **同じ辺に当たる穴が 3 つあっても塗れること。**
+    ///
+    /// 游ゴシックの `面` と同じ並びです。縦に積んだ穴 3 つの右に、
+    /// その 3 つを縦に跨ぐ穴が 1 つあります。
+    ///
+    /// ```text
+    ///   ┌──────────────┐
+    ///   │ ┌──┐  ┌────┐ │   左の 3 つから +X に線を飛ばすと、
+    ///   │ └──┘  │    │ │   どれも右の穴の**同じ縦の辺**に当たる
+    ///   │ ┌──┐  │    │ │
+    ///   │ └──┘  │    │ │   以前は 3 本の通路が 1 つの頂点に集まり、
+    ///   │ ┌──┐  │    │ │   互いを跨いで耳が無くなっていた
+    ///   │ └──┘  └────┘ │
+    ///   └──────────────┘
+    /// ```
+    ///
+    /// 直したのは [`open_bridge`]。当たった点を辺の上に差し込むので、
+    /// 穴ごとに別の点へつながります。
+    #[test]
+    fn three_holes_hitting_one_edge_each_get_their_own_bridge() {
+        let outer = closed_ring(&[(0.0, 0.0), (200.0, 0.0), (200.0, 200.0), (0.0, 200.0)]);
+        // 右の、縦に長い穴。
+        let tall = closed_ring(&[(120.0, 20.0), (170.0, 20.0), (170.0, 180.0), (120.0, 180.0)]);
+        // 左の、縦に積んだ 3 つ。どれも `tall` の左の辺に当たる高さ。
+        let stack: Vec<Vec<(f32, f32)>> = [30.0, 90.0, 150.0]
+            .into_iter()
+            .map(|y| closed_ring(&[(30.0, y), (90.0, y), (90.0, y + 30.0), (30.0, y + 30.0)]))
+            .collect();
+
+        let mut contours = vec![outer, tall];
+        contours.extend(stack);
+
+        let triangles = filled_contours(&contours);
+
+        assert_triangle_list(&triangles);
+
+        let expected = 200.0 * 200.0 - 50.0 * 160.0 - 3.0 * 60.0 * 30.0;
+        assert!(
+            (total_area(&triangles) - expected).abs() < 1e-2,
+            "{} vs {expected}",
+            total_area(&triangles),
+        );
+
+        assert_holes_are_clean(
+            &triangles,
+            200.0,
+            &[
+                (120.0, 20.0, 170.0, 180.0),
+                (30.0, 30.0, 90.0, 60.0),
+                (30.0, 90.0, 90.0, 120.0),
+                (30.0, 150.0, 90.0, 180.0),
+            ],
+        );
+    }
+
+    /// **重なっているだけの輪郭を、穴と取り違えて捨てないこと。**
+    ///
+    /// `Ç` の下の飾りや `Å` の上の輪は、本体と少しだけ重なった別の形です。
+    /// 包含関係の判定は輪郭の 1 点（いちばん上の頂点）だけで見るので、
+    /// 重なったぶんに入っていると穴に見えます。
+    ///
+    /// 穴として扱うと外周につなげず、以前は
+    /// `a hole could not be bridged` と言って**捨てていました**。
+    /// 捨てると飾りが消えます。つなげなかったものは
+    /// 単独で塗り直します（[`fill`]）。
+    #[test]
+    fn an_overlapping_contour_is_filled_instead_of_dropped() {
+        // 本体。
+        let body = closed_ring(&[(0.0, 0.0), (100.0, 0.0), (100.0, 60.0), (0.0, 60.0)]);
+        // 飾り。下にぶら下がり、本体と 10 だけ重なる。巻き方向は本体と同じ。
+        let tail = closed_ring(&[(30.0, 50.0), (70.0, 50.0), (70.0, 90.0), (30.0, 90.0)]);
+
+        let triangles = filled_contours(&[body, tail]);
+
+        assert_triangle_list(&triangles);
+
+        // 飾りが出ている。消えていたらここが 0 になる。
+        assert!(
+            coverage(&triangles, point(50.5, 80.5)) >= 1,
+            "飾りが塗られていない",
+        );
+
+        // 本体も出ている。
+        assert!(coverage(&triangles, point(10.5, 30.5)) >= 1, "本体が塗られていない");
+
+        // 重なっていないところには何も無い。
+        assert_eq!(coverage(&triangles, point(10.5, 80.5)), 0, "飾りの外");
+
+        // 面積は本体 + 飾り。重なったぶんは二重に塗られるので、そのぶん多い。
+        // 1 色の形なら見た目は変わらない。
+        let body_area = 100.0 * 60.0;
+        let tail_area = 40.0 * 40.0;
+        let expected = body_area + tail_area;
+
+        assert!(
+            (total_area(&triangles) - expected).abs() < 1e-2,
+            "{} vs {expected}",
+            total_area(&triangles),
+        );
+    }
+
+    /// 本物の穴は、重なっていなければこれまでどおり抜けること。
+    ///
+    /// 上の手当てで穴が塗られるようになっては困る。
+    #[test]
+    fn a_real_hole_is_still_cut_out() {
+        let outer = closed_ring(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        let hole = closed_ring(&[(30.0, 30.0), (70.0, 30.0), (70.0, 70.0), (30.0, 70.0)]);
+
+        let triangles = filled_contours(&[outer, hole]);
+
+        assert_triangle_list(&triangles);
+        assert_holes_are_clean(&triangles, 100.0, &[(30.0, 30.0, 70.0, 70.0)]);
+
+        let expected = 100.0 * 100.0 - 40.0 * 40.0;
+        assert!(
+            (total_area(&triangles) - expected).abs() < 1e-2,
+            "{} vs {expected}",
+            total_area(&triangles),
+        );
+    }
+
+    /// 同じ場所に続く点も落ちること。曲線を細かく刻むと出ることがある。
+    #[test]
+    fn repeated_points_are_folded_away() {
+        let triangles = filled_contours(&[vec![
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (0.0, 10.0),
+        ]]);
+
+        assert_triangle_list(&triangles);
+        // 4 点の四角として扱われる。
+        assert_eq!(triangles.len(), 3 * 2);
+        assert!((total_area(&triangles) - 100.0).abs() < 1e-3);
+    }
+
+    /// **開いた折れ線では、始点に戻る最後の点を落とさないこと。**
+    ///
+    /// 閉じた輪郭では長さ 0 の辺ですが、開いた折れ線では**消してはいけない
+    /// 線分**です。落とすと一辺足りない線になります。
+    #[test]
+    fn an_open_polyline_keeps_the_point_that_returns_to_the_start() {
+        let paint_type = |strip| PaintType::Stroke {
+            line_width: 4.0,
+            joint_type: JointType::Miter,
+            strip,
+            dash: None,
+        };
+
+        let square = to_vertices(&[(0.0, 0.0), (50.0, 0.0), (50.0, 50.0), (0.0, 50.0)]);
+        let returning = to_vertices(&closed_ring(&[
+            (0.0, 0.0),
+            (50.0, 0.0),
+            (50.0, 50.0),
+            (0.0, 50.0),
+        ]));
+
+        // 開いた折れ線。始点に戻る点があるぶん、1 辺ぶん長い。
+        let mut open_without = Vec::new();
+        tessellate(&square, &[0], paint_type(true), &mut open_without);
+
+        let mut open_with = Vec::new();
+        tessellate(&returning, &[0], paint_type(true), &mut open_with);
+
+        assert!(
+            open_with.len() > open_without.len(),
+            "{} vs {}",
+            open_with.len(),
+            open_without.len(),
+        );
+
+        // 閉じた輪では、戻る点があっても無くても同じ。
+        let mut closed_without = Vec::new();
+        tessellate(&square, &[0], paint_type(false), &mut closed_without);
+
+        let mut closed_with = Vec::new();
+        tessellate(&returning, &[0], paint_type(false), &mut closed_with);
+
+        assert_eq!(closed_with.len(), closed_without.len());
     }
 
     /// 線は輪郭ごとに引かれる。穴の縁にも線が付く。
