@@ -41,7 +41,8 @@ use std::ops::Range;
 
 use fxhash::FxHashMap;
 use ttf_parser::GlyphId;
-
+use gueiz_gpu::camera::ScaleMode;
+use gueiz_gpu::renderer::SurfaceSize;
 use crate::camera::Camera;
 use crate::error::Gueiz2DError;
 use crate::font::{DEFAULT_TOLERANCE, Font};
@@ -1240,6 +1241,11 @@ impl TextRenderer {
     pub fn camera(&mut self, camera: Camera) -> &mut Self {
         self.camera = camera;
         self
+    }
+
+    pub fn camera_for(&mut self, surface_size: SurfaceSize, scale_mode: ScaleMode) -> &mut Self {
+        let camera = Camera::orthographic_2d(surface_size.width as f32, surface_size.height as f32);
+        self.camera(camera.with_scale_mode(scale_mode))
     }
 
     /// 登録済みの形。カメラを貼り直したいときなどに。

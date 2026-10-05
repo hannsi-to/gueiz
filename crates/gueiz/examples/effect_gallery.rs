@@ -272,7 +272,7 @@ fn tiles() -> Vec<Tile> {
             }],
         ),
         Tile::new(
-            "Stops 繰り返し",
+            "Stops 繰り返し 図形 頂点",
             vec![Block::GradientStops {
                 gradient: Gradient::radial([0.5, 0.5], 0.18, 0.18)
                     .spread(GradientSpread::Repeat)
