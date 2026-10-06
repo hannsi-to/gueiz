@@ -203,6 +203,11 @@ pub struct PlacedLine {
     pub y: f32,
     /// 引いている字の大きさ。太さの基準。
     pub size: f32,
+    /// 何行目か。[`PlacedGlyph::row`] と同じ番号。
+    ///
+    /// 行ごとに寄せるのに要ります（[`TextLayout::align_in`]）。
+    /// 線は行をまたがないので、必ず 1 つに決まります。
+    pub row: usize,
     pub decoration: LineDecoration,
     pub color: Option<[f32; 4]>,
     pub alpha_scale: f32,
@@ -338,6 +343,148 @@ pub struct TextLayout {
     pub ink: InkBounds,
 }
 
+/// 枠の中での寄せ方。
+///
+/// 横なら `Start` が左・`End` が右、縦なら `Start` が上・`End` が下です。
+/// 「左」「右」と書かないのは、将来右から左へ書く文字を入れたときに
+/// 意味が裏返るためです。
+#[derive(Clone, Copy)]
+#[derive(Eq, PartialEq)]
+#[derive(Hash)]
+#[derive(Debug, Default)]
+pub enum TextAlign {
+    #[default]
+    Start,
+    Center,
+    End,
+}
+
+impl TextAlign {
+    /// `available` の中に `used` を置くときの、手前からの距離。
+    ///
+    /// `used` のほうが大きいと負になります。**切り詰めません。**
+    /// 枠からはみ出すかは呼ぶ側が決めることで、ここで勝手に縮めると
+    /// 字が枠の中へ寄ってしまい、はみ出していることが分からなくなります。
+    pub fn offset(self, available: f32, used: f32) -> f32 {
+        let slack = available - used;
+
+        match self {
+            Self::Start => 0.0,
+            Self::Center => slack / 2.0,
+            Self::End => slack,
+        }
+    }
+}
+
+/// 字を置く枠。
+///
+/// # なぜ [`TextStyle`] ではなくこちらに寄せを置くのか
+///
+/// [`TextStyle`] は**字の見た目**の入れ物で、[`crate::format`] の書式コードで
+/// 文字列の途中から変えられます。「この行から大きく」「ここから斜体」が
+/// できる値です。
+///
+/// 寄せは**置き方**なので、途中から変わりません。同じ入れ物に混ぜると
+/// 「3 文字目から中央寄せ」のような意味を持たない指定が書けてしまいます。
+/// 縦の寄せや折り返し幅も枠が決まって初めて意味を持つので、まとめてこちらに
+/// 置いています。
+///
+/// ```no_run
+/// # use gueiz_2d::draw_manager::DrawManager;
+/// # use gueiz_2d::font::Font;
+/// # use gueiz_2d::text::{TextAlign, TextArea, TextRenderer, TextStyle};
+/// # fn run(font: &Font, draw_manager: &mut DrawManager) -> Result<(), Box<dyn std::error::Error>> {
+/// let mut text = TextRenderer::new();
+///
+/// // 100,100 から 400x200 の枠の、まん中に置く。
+/// text.write_in(
+///     draw_manager,
+///     font,
+///     "決定しますか？",
+///     &TextStyle::new(24.0),
+///     TextArea::new(100.0, 100.0, 400.0, 200.0).centered(),
+/// )?;
+///
+/// // 右下に寄せて、枠の幅で折り返す。
+/// text.write_in(
+///     draw_manager,
+///     font,
+///     "長い説明文がここに入ります",
+///     &TextStyle::new(14.0),
+///     TextArea::new(100.0, 320.0, 400.0, 80.0)
+///         .horizontal(TextAlign::End)
+///         .vertical(TextAlign::End)
+///         .wrapped(),
+/// )?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy)]
+#[derive(PartialEq)]
+#[derive(Debug, Default)]
+pub struct TextArea {
+    /// 枠の左上。ピクセル。
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub horizontal: TextAlign,
+    pub vertical: TextAlign,
+    /// 折り返し方。`None` なら折り返さず、枠からはみ出します。
+    pub wrap: Option<WrapMode>,
+}
+
+impl TextArea {
+    /// 左上に寄せた、折り返さない枠。
+    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            horizontal: TextAlign::Start,
+            vertical: TextAlign::Start,
+            wrap: None,
+        }
+    }
+
+    /// 1 点だけを指す枠。**寄せは効きません**（幅も高さも 0 なので）。
+    ///
+    /// [`TextRenderer::write`] と同じ置き方です。
+    pub fn at(x: f32, y: f32) -> Self {
+        Self::new(x, y, 0.0, 0.0)
+    }
+
+    pub fn horizontal(mut self, horizontal: TextAlign) -> Self {
+        self.horizontal = horizontal;
+        self
+    }
+
+    pub fn vertical(mut self, vertical: TextAlign) -> Self {
+        self.vertical = vertical;
+        self
+    }
+
+    /// 縦も横もまん中。
+    pub fn centered(mut self) -> Self {
+        self.horizontal = TextAlign::Center;
+        self.vertical = TextAlign::Center;
+        self
+    }
+
+    /// 枠の幅で折り返す。
+    pub fn wrapped(mut self) -> Self {
+        self.wrap = Some(WrapMode::default());
+        self
+    }
+
+    /// 折り返し方を決めて折り返す。
+    pub fn wrap(mut self, mode: WrapMode) -> Self {
+        self.wrap = Some(mode);
+        self
+    }
+}
+
 /// 文字列が使う大きさ。置き場所は含まない。
 ///
 /// # 幅と高さが 2 組あるのはなぜか
@@ -406,6 +553,106 @@ impl TextLayout {
             rows: self.rows.len(),
             first_baseline: self.first_baseline,
         }
+    }
+
+    /// 枠の中へ寄せる。**GPU は触りません。**
+    ///
+    /// `width` / `height` は枠の大きさ。並べた結果を枠の中へ動かします。
+    ///
+    /// # 行ごとに寄せます
+    ///
+    /// まとまりごと動かすのではなく、**行ごとに** [`TextRow::width`] を見て
+    /// 動かします。測ってから `x` をずらすだけでは、こうなりません。
+    ///
+    /// ```text
+    ///   まとまりごと動かす          行ごとに寄せる（これ）
+    ///   ┌──────────────┐        ┌──────────────┐
+    ///   │   これは長い行です   │        │   これは長い行です   │
+    ///   │   短い行        │        │      短い行      │
+    ///   └──────────────┘        └──────────────┘
+    /// ```
+    ///
+    /// # 動くもの・動かないもの
+    ///
+    /// [`TextLayout::glyphs`]・[`TextLayout::decorations`]・
+    /// [`TextLayout::rows`]・[`TextLayout::ink`]・
+    /// [`TextLayout::first_baseline`] が動きます。
+    ///
+    /// [`TextLayout::width`] と [`TextLayout::height`] は**動きません**。
+    /// これは字そのものが使う大きさで、枠の大きさとは別のものです。
+    /// 枠の大きさは渡した側が知っています。
+    ///
+    /// # 枠より字のほうが大きいとき
+    ///
+    /// **はみ出します。切り詰めません。** 中央寄せなら両側へ、
+    /// 末尾寄せなら手前へはみ出します。収めたいなら折り返すか、
+    /// [`crate::clip`] で切り抜いてください。
+    ///
+    /// ```
+    /// # use gueiz_2d::text::{TextAlign, TextLayout, TextRow};
+    /// let mut layout = TextLayout {
+    ///     width: 100.0,
+    ///     height: 20.0,
+    ///     rows: vec![TextRow { width: 100.0, ..Default::default() }],
+    ///     ..Default::default()
+    /// };
+    ///
+    /// // 300 幅の枠のまん中へ。
+    /// layout.align_in(300.0, 20.0, TextAlign::Center, TextAlign::Start);
+    ///
+    /// assert_eq!(layout.rows[0].ink.left, 100.0);
+    /// // 字が使う大きさは変わらない。
+    /// assert_eq!(layout.width, 100.0);
+    /// ```
+    pub fn align_in(
+        &mut self,
+        width: f32,
+        height: f32,
+        horizontal: TextAlign,
+        vertical: TextAlign,
+    ) {
+        if self.rows.is_empty() {
+            return;
+        }
+
+        let down = vertical.offset(height, self.height);
+
+        // 行ごとの寄せ幅。先に全部出しておく。グリフは行番号で引く。
+        let across: Vec<f32> = self
+            .rows
+            .iter()
+            .map(|row| horizontal.offset(width, row.width))
+            .collect();
+
+        let offset_of = |row: usize| across.get(row).copied().unwrap_or(0.0);
+
+        for glyph in &mut self.glyphs {
+            glyph.x += offset_of(glyph.row);
+            glyph.y += down;
+        }
+
+        for line in &mut self.decorations {
+            line.x += offset_of(line.row);
+            line.y += down;
+        }
+
+        for (index, row) in self.rows.iter_mut().enumerate() {
+            let across = across[index];
+
+            row.top += down;
+            row.baseline += down;
+            row.ink = row.ink.translated(across, down);
+        }
+
+        // 行ごとに違う量だけ動いたので、まとめ直す。
+        self.ink = self
+            .rows
+            .iter()
+            .map(|row| row.ink)
+            .reduce(InkBounds::union)
+            .unwrap_or_default();
+
+        self.first_baseline += down;
     }
 
     /// 中身を空にする。確保した領域は残すので、詰め直しても割り当てが起きない。
@@ -1056,9 +1303,10 @@ impl<'a, M: Metrics> LayoutContext<'a, M> {
             position,
             x: start_x,
             width,
-            // ベースラインは行が閉じるときに足す。
+            // ベースラインと行番号は行が閉じるときに入れる。
             y,
             size: run.size,
+            row: 0,
             decoration: run.decoration,
             color: run.color,
             alpha_scale: run.alpha_scale,
@@ -1084,6 +1332,7 @@ impl<'a, M: Metrics> LayoutContext<'a, M> {
 
         for line in &mut out.decorations[self.row_start_decoration..] {
             line.y += baseline;
+            line.row = self.row_index;
         }
 
         let height = self.row_ascent + self.row_descent;
@@ -1243,8 +1492,21 @@ impl TextRenderer {
         self
     }
 
-    pub fn camera_for(&mut self, surface_size: SurfaceSize, scale_mode: ScaleMode) -> &mut Self {
-        let camera = Camera::orthographic_2d(surface_size.width as f32, surface_size.height as f32);
+    /// 窓に合わせたカメラを貼る。渡し方は
+    /// [`Object::camera_for`](crate::object::Object::camera_for) と同じ。
+    ///
+    /// **形を登録する前に決めること。** 字の形は出てきた順に登録されるので、
+    /// 後から変えてもすでに登録したぶんには効きません
+    /// （貼り直すなら [`TextRenderer::shape_ids`] を回してください）。
+    pub fn camera_for(
+        &mut self,
+        surface_size: SurfaceSize,
+        design: [f32; 2],
+        scale_mode: ScaleMode,
+    ) -> &mut Self {
+        let mut camera = Camera::orthographic_2d(design[0], design[1]);
+        camera.resize(surface_size.width as f32, surface_size.height as f32);
+
         self.camera(camera.with_scale_mode(scale_mode))
     }
 
@@ -1309,6 +1571,77 @@ impl TextRenderer {
         y: f32,
     ) -> Result<TextLayout, Gueiz2DError> {
         self.write_formatted(draw_manager, font, &Formatted::plain(text), style, x, y)
+    }
+
+    /// 枠の中に置く。寄せと折り返しは [`TextArea`] が決める。
+    ///
+    /// 返る [`TextLayout`] は**寄せたあと**の位置です。枠の左上からの相対で、
+    /// 画面の位置にするには [`TextArea::x`] / [`TextArea::y`] を足します
+    /// （[`InkBounds::translated`]）。当たり判定やキャレットの位置出しに
+    /// そのまま使えます。
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::draw_manager::DrawManager;
+    /// # use gueiz_2d::font::Font;
+    /// # use gueiz_2d::text::{TextArea, TextRenderer, TextStyle};
+    /// # fn run(font: &Font, draw_manager: &mut DrawManager) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut text = TextRenderer::new();
+    ///
+    /// let placed = text.write_in(
+    ///     draw_manager,
+    ///     font,
+    ///     "ボタンの札",
+    ///     &TextStyle::new(16.0),
+    ///     TextArea::new(0.0, 0.0, 200.0, 40.0).centered(),
+    /// )?;
+    ///
+    /// // 枠からはみ出していないか。
+    /// assert!(placed.ink.left >= 0.0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn write_in(
+        &mut self,
+        draw_manager: &mut DrawManager,
+        font: &Font,
+        text: &str,
+        style: &TextStyle,
+        area: TextArea,
+    ) -> Result<TextLayout, Gueiz2DError> {
+        self.write_formatted_in(draw_manager, font, &Formatted::plain(text), style, area)
+    }
+
+    /// 書式を読んで枠の中に置く。
+    pub fn write_formatted_in(
+        &mut self,
+        draw_manager: &mut DrawManager,
+        font: &Font,
+        formatted: &Formatted,
+        style: &TextStyle,
+        area: TextArea,
+    ) -> Result<TextLayout, Gueiz2DError> {
+        // 折り返しは並べ直しではなく改行の差し込みなので、並べる前に通す。
+        let folded;
+        let formatted = match area.wrap {
+            Some(mode) => {
+                folded = wrap(font, formatted, style, area.width, mode);
+                &folded
+            }
+            None => formatted,
+        };
+
+        let mut placed = layout_formatted(font, formatted, style);
+        placed.align_in(area.width, area.height, area.horizontal, area.vertical);
+
+        for glyph in &placed.glyphs {
+            self.place_glyph(draw_manager, font, style, glyph, area.x, area.y)?;
+        }
+
+        for line in &placed.decorations {
+            self.place_line(draw_manager, line, area.x, area.y)?;
+        }
+
+        Ok(placed)
     }
 
     /// 書式を読んで置く。
@@ -2389,6 +2722,175 @@ mod tests {
         assert_eq!(placed.rows[1].top, 100.0);
     }
 
+    // --- 枠の中に寄せる ---
+
+    /// 字 1 つの送り幅。大きさ 32 なので 16。
+    const STEP: f32 = FakeFont::ADVANCE * 32.0;
+
+    /// **行ごとに寄せること。** まとまりごと動かすのでは駄目。
+    ///
+    /// 測って `x` をずらすだけだと、長い行と短い行が同じだけ動いて
+    /// 揃いません。寄せは行の幅を見て行ごとに決まります。
+    #[test]
+    fn each_row_is_aligned_on_its_own() {
+        let mut layout = place("aaaa\nab", &TextStyle::new(32.0));
+
+        assert_eq!(layout.rows[0].width, STEP * 4.0);
+        assert_eq!(layout.rows[1].width, STEP * 2.0);
+
+        layout.align_in(STEP * 10.0, 0.0, TextAlign::Center, TextAlign::Start);
+
+        // 長い行は (10 - 4) / 2 = 3 字ぶん、短い行は (10 - 2) / 2 = 4 字ぶん。
+        assert_eq!(layout.glyphs[0].x, STEP * 3.0, "1 行目");
+        assert_eq!(layout.glyphs[4].x, STEP * 4.0, "2 行目は余計に動く");
+    }
+
+    #[test]
+    fn start_alignment_moves_nothing() {
+        let before = place("ab\ncd", &TextStyle::new(32.0));
+        let mut after = before.clone();
+
+        after.align_in(1000.0, 1000.0, TextAlign::Start, TextAlign::Start);
+
+        assert_eq!(after.glyphs[0].x, before.glyphs[0].x);
+        assert_eq!(after.glyphs[0].y, before.glyphs[0].y);
+        assert_eq!(after.ink, before.ink);
+        assert_eq!(after.first_baseline, before.first_baseline);
+    }
+
+    #[test]
+    fn end_alignment_puts_the_far_edge_on_the_far_edge() {
+        let mut layout = place("abc", &TextStyle::new(32.0));
+        let width = layout.rows[0].width;
+
+        layout.align_in(STEP * 10.0, 0.0, TextAlign::End, TextAlign::Start);
+
+        assert_eq!(layout.glyphs[0].x, STEP * 10.0 - width);
+    }
+
+    /// 縦は行ごとではなく、まとまりごと動く。行の順番は変わらない。
+    #[test]
+    fn vertical_alignment_moves_the_whole_block() {
+        let style = TextStyle::new(32.0);
+        let mut layout = place("ab\ncd", &style);
+
+        let height = layout.height;
+        let first = layout.rows[0].top;
+        let second = layout.rows[1].top;
+        let baseline = layout.first_baseline;
+
+        layout.align_in(0.0, height + 100.0, TextAlign::Start, TextAlign::Center);
+
+        // 枠の高さを「字の高さ + 100」にしたので、上下に 50 ずつ余る。
+        // 引き算を挟むので、ぴったりは出ない。
+        let moved_by_50 = |after: f32, before: f32| (after - before - 50.0).abs() < 1e-3;
+
+        assert!(moved_by_50(layout.rows[0].top, first));
+        assert!(moved_by_50(layout.rows[1].top, second));
+        assert!(moved_by_50(layout.first_baseline, baseline));
+        assert!(moved_by_50(layout.glyphs[0].y, FakeFont::ASCENDER * 32.0));
+    }
+
+    /// 字が使う大きさは寄せても変わらない。枠の大きさとは別のもの。
+    #[test]
+    fn the_text_keeps_its_own_size() {
+        let mut layout = place("abc", &TextStyle::new(32.0));
+        let size = layout.size();
+
+        layout.align_in(10000.0, 10000.0, TextAlign::Center, TextAlign::End);
+
+        assert_eq!(layout.width, size.width);
+        assert_eq!(layout.height, size.height);
+    }
+
+    /// **枠より字が大きければはみ出す。切り詰めない。**
+    ///
+    /// ここで枠の中へ押し込むと、はみ出していることが分からなくなります。
+    #[test]
+    fn text_wider_than_the_area_overflows() {
+        let mut layout = place("abcd", &TextStyle::new(32.0));
+
+        layout.align_in(STEP * 2.0, 0.0, TextAlign::Center, TextAlign::Start);
+
+        // (2 - 4) / 2 = -1 字ぶん手前へ出る。
+        assert_eq!(layout.glyphs[0].x, -STEP);
+        assert!(layout.ink.left < 0.0);
+    }
+
+    /// 塗られる範囲も一緒に動くこと。背景の箱を敷くのに使う。
+    #[test]
+    fn the_ink_follows_the_alignment() {
+        let mut layout = place("aaaa\nab", &TextStyle::new(32.0));
+        let before = layout.ink;
+
+        layout.align_in(STEP * 10.0, 0.0, TextAlign::Center, TextAlign::Start);
+
+        // 行ごとに違う量だけ動くので、まとめ直した範囲は手前の行に引っぱられる。
+        assert!(layout.ink.left > before.left);
+        assert_eq!(layout.ink.left, layout.rows[0].ink.left.min(layout.rows[1].ink.left));
+        assert_eq!(layout.ink.right, layout.rows[0].ink.right.max(layout.rows[1].ink.right));
+    }
+
+    /// 下線も字と同じだけ動くこと。行番号を持っているので行ごとに揃う。
+    #[test]
+    fn decorations_move_with_their_own_row() {
+        let style = TextStyle::new(32.0);
+        let mut layout = place_formatted("§[underline]aaaa§[/]§[ln]§[underline]ab", &style);
+
+        assert_eq!(layout.decorations.len(), 2);
+        assert_eq!(layout.decorations[0].row, 0);
+        assert_eq!(layout.decorations[1].row, 1);
+
+        let before = [layout.decorations[0].x, layout.decorations[1].x];
+
+        layout.align_in(STEP * 10.0, 0.0, TextAlign::Center, TextAlign::Start);
+
+        assert_eq!(layout.decorations[0].x, before[0] + STEP * 3.0);
+        assert_eq!(layout.decorations[1].x, before[1] + STEP * 4.0, "短い行は余計に動く");
+
+        // 線の下に字が来ていること。
+        assert_eq!(layout.decorations[1].x, layout.glyphs[4].x);
+    }
+
+    #[test]
+    fn an_empty_layout_is_left_alone() {
+        let mut layout = TextLayout::default();
+        layout.align_in(100.0, 100.0, TextAlign::Center, TextAlign::Center);
+
+        assert!(layout.rows.is_empty());
+        assert_eq!(layout.ink, InkBounds::default());
+    }
+
+    /// 枠は寄せ方を組み立てるだけの入れ物。
+    #[test]
+    fn an_area_builds_up_its_alignment() {
+        let area = TextArea::new(10.0, 20.0, 300.0, 100.0);
+
+        assert_eq!(area.horizontal, TextAlign::Start);
+        assert_eq!(area.vertical, TextAlign::Start);
+        assert!(area.wrap.is_none());
+
+        let centered = area.centered().wrapped();
+
+        assert_eq!(centered.horizontal, TextAlign::Center);
+        assert_eq!(centered.vertical, TextAlign::Center);
+        assert_eq!(centered.wrap, Some(WrapMode::default()));
+        // 枠そのものは変わらない。
+        assert_eq!((centered.x, centered.y), (10.0, 20.0));
+
+        // 1 点を指す枠は寄せが効かない（幅も高さも 0）。
+        assert_eq!(TextArea::at(5.0, 6.0).width, 0.0);
+    }
+
+    #[test]
+    fn alignment_offsets_are_plain_arithmetic() {
+        assert_eq!(TextAlign::Start.offset(100.0, 40.0), 0.0);
+        assert_eq!(TextAlign::Center.offset(100.0, 40.0), 30.0);
+        assert_eq!(TextAlign::End.offset(100.0, 40.0), 60.0);
+        // はみ出すときは負。切り詰めない。
+        assert_eq!(TextAlign::End.offset(10.0, 40.0), -30.0);
+    }
+
     // --- 線 ---
 
     /// 下線は、書式が効いている範囲だけに引かれる。
@@ -2956,6 +3458,7 @@ mod tests {
             width: 100.0,
             y: 0.0,
             size: 40.0,
+            row: 0,
             decoration: LineDecoration::new(0.05, JointType::Miter, 1),
             color: None,
             alpha_scale: 1.0,

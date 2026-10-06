@@ -1040,6 +1040,40 @@ struct CullConfig {
 }
 
 /// 登録された図形をまとめて描く。
+/// 当たった図形と複製。[`DrawManager::pick`] が返す。
+///
+/// 名前で持つのは、[`DrawManager`] が図形を名前で引く作りだからです。
+/// そのまま [`DrawManager::object_mut`] に渡せます。
+///
+/// # なぜ名前を借りずに持つのか
+///
+/// 借りたままだと [`DrawManager`] を借り続けることになり、
+/// **掴んだ直後に書き換えられません。**
+///
+/// ```ignore
+/// let pick = draw_manager.pick(x, y)?;        // ここで借りる
+/// draw_manager.object_mut(pick.name);         // 借用が重なって通らない
+/// ```
+///
+/// 押した直後に動かす、色を変える、というのがいちばん多い使い方なので、
+/// そこで詰まらないほうを選びました。確保は当たったぶんだけで、
+/// 押した瞬間に 1 回なので費用になりません。
+#[derive(Clone)]
+#[derive(PartialEq)]
+#[derive(Debug)]
+pub struct Pick {
+    /// 登録名。
+    pub name: String,
+    /// 何番目の複製か。
+    /// [`Object::instance_mut`](crate::object::Object::instance_mut) に渡せる。
+    pub instance: usize,
+    /// **その複製の座標へ戻した点。**
+    ///
+    /// 掴んだ場所からのずれを出すのに使います。これを覚えておけば、
+    /// ドラッグで図形が指に吸い付きます。
+    pub local: [f32; 2],
+}
+
 pub struct DrawManager {
     render_pipeline: wgpu::RenderPipeline,
     cull_pipeline: wgpu::ComputePipeline,
@@ -1708,6 +1742,101 @@ impl DrawManager {
     /// いま貼っている絵を分け合う。
     pub fn shared_sprite_sheet(&self) -> Arc<SpriteSheet> {
         Arc::clone(&self.sprite_sheet)
+    }
+
+    // --- 当たり判定 ---
+
+    /// 画面の画素位置に当たっている、**いちばん手前**の図形と複製。
+    ///
+    /// # 何を渡すか
+    ///
+    /// **サーフェスの画素位置**です。窓の左上が `(0, 0)`。マウスの位置を
+    /// そのまま渡せます。
+    ///
+    /// 図形ごとの座標へは [`Camera::screen_to_world`] で戻します。
+    /// **カメラは図形ごとに違ってよい**ので、図形ごとに戻しています。
+    /// カメラの窓の大きさが実際のサーフェスと食い違っていると、
+    /// 当たる場所がずれます（[`Object::camera_for`] を貼り直し忘れたとき）。
+    ///
+    /// # 順番
+    ///
+    /// [`DrawManager::draw_order`] を**手前から**なめます。描いた順と当たる順が
+    /// 揃うので、重なっていれば見えているほうが取れます。
+    ///
+    /// **[`DrawManager::prepare`] の後に呼ぶこと。** 並べ替えはそこで起きるので、
+    /// まだなら登録順になり、手前後ろが描画と食い違います。
+    ///
+    /// # 複製を足していない図形は当たりません
+    ///
+    /// [`Object::hit`] に合わせています。「置かれていないものに当たっては困る」
+    /// という決めごとです。
+    ///
+    /// # 速さ
+    ///
+    /// 図形の数 × 複製の数 × 三角形の数に比例します。押した瞬間に 1 回なら
+    /// 問題になりませんが、毎フレーム数千の図形を当てるなら、先に大まかな枠で
+    /// 絞ってください。
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::draw_manager::DrawManager;
+    /// # fn run(draw_manager: &mut DrawManager, mouse_x: f32, mouse_y: f32) {
+    /// let Some(pick) = draw_manager.pick(mouse_x, mouse_y) else {
+    ///     return;
+    /// };
+    ///
+    /// println!("{} の {} 番目、図形の中では {:?}", pick.name, pick.instance, pick.local);
+    ///
+    /// // 掴んだ直後にそのまま書き換えられる。
+    /// if let Some(object) = draw_manager.object_mut(&pick.name) {
+    ///     object.instance_mut(pick.instance);
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// [`Camera::screen_to_world`]: crate::camera::Camera::screen_to_world
+    /// [`Object::camera_for`]: crate::object::Object::camera_for
+    pub fn pick(&self, screen_x: f32, screen_y: f32) -> Option<Pick> {
+        self.front_to_back()
+            .find_map(|index| self.pick_object(index, screen_x, screen_y))
+    }
+
+    /// その位置に当たっているものを**全部**、手前から順に。
+    ///
+    /// 重なりを数えたり、下にあるものまで拾いたいときに。
+    /// 1 つでよいなら [`DrawManager::pick`] のほうが途中で止まるぶん速いです。
+    pub fn pick_all(&self, screen_x: f32, screen_y: f32) -> Vec<Pick> {
+        self.front_to_back()
+            .filter_map(|index| self.pick_object(index, screen_x, screen_y))
+            .collect()
+    }
+
+    /// 手前から順に図形の番号を返す。
+    ///
+    /// [`DrawManager::prepare`] がまだで並びが揃っていなければ登録順を使う。
+    /// 当たらないよりは、順番が怪しくても当たるほうがよい。
+    fn front_to_back(&self) -> impl Iterator<Item = usize> + '_ {
+        let sorted = self.draw_order.len() == self.objects.len();
+
+        (0..self.objects.len())
+            .rev()
+            .map(move |position| if sorted { self.draw_order[position] } else { position })
+    }
+
+    /// 図形 1 つを当ててみる。
+    fn pick_object(&self, index: usize, screen_x: f32, screen_y: f32) -> Option<Pick> {
+        let object = self.objects.get(index)?;
+
+        // 画素 → この図形の座標。カメラが相対なら、ここでずれが戻る。
+        let [world_x, world_y] = object.view_camera().screen_to_world(screen_x, screen_y)?;
+
+        let instance = object.hit(world_x, world_y)?;
+        let local = object.to_local(instance, world_x, world_y)?;
+
+        Some(Pick {
+            name: String::from(object.name()),
+            instance,
+            local,
+        })
     }
 
     /// 描く順。z の小さい順に並べた図形の番号。

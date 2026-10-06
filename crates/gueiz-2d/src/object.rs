@@ -191,8 +191,61 @@ impl Object {
         self
     }
     
-    pub fn camera_for(&mut self, surface_size: SurfaceSize, scale_mode: ScaleMode) -> &mut Self {
-        let camera = Camera::orthographic_2d(surface_size.width as f32, surface_size.height as f32);
+    /// 窓に合わせたカメラを貼る。
+    ///
+    /// `design` は**絵を組むときの基準の大きさ**、`surface_size` は
+    /// **いまの窓の大きさ（物理ピクセル）**です。この 2 つの比が倍率になります。
+    ///
+    /// # 基準に窓の大きさを渡してはいけない
+    ///
+    /// 渡すと比が必ず 1 になり、`scale_mode` が何であっても
+    /// [`ScaleMode::Fixed`] と同じ動き（1 単位 = 1 **物理**ピクセル）になります。
+    /// 以前そうなっていて、表示倍率の違う画面で大きさが変わっていました。
+    ///
+    /// # よくある 2 つの渡し方
+    ///
+    /// **論理ピクセルで組む（ふつうの GUI）**
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::camera::ScaleMode;
+    /// # use gueiz_2d::object::Object;
+    /// # use gueiz_2d::renderer::SurfaceSize;
+    /// # fn run(object: &mut Object, surface_size: SurfaceSize, scale_factor: f32) {
+    /// // 1 単位 = 1 論理ピクセル。OS の言う大きさに揃う。
+    /// object.camera_for(
+    ///     surface_size,
+    ///     surface_size.to_logical(scale_factor),
+    ///     ScaleMode::Stretch,
+    /// );
+    /// # }
+    /// ```
+    ///
+    /// 基準と窓の縦横比が同じなので、[`ScaleMode::Stretch`] でも歪みません。
+    ///
+    /// **基準の解像度に合わせて伸ばす（ゲーム風）**
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::camera::ScaleMode;
+    /// # use gueiz_2d::object::Object;
+    /// # use gueiz_2d::renderer::SurfaceSize;
+    /// # fn run(object: &mut Object, surface_size: SurfaceSize) {
+    /// // 1920x1080 で組んだ絵を、窓に合わせて丸ごと拡大する。
+    /// object.camera_for(surface_size, [1920.0, 1080.0], ScaleMode::Fit);
+    /// # }
+    /// ```
+    ///
+    /// [`ScaleMode::Fixed`]: crate::camera::ScaleMode::Fixed
+    /// [`ScaleMode::Stretch`]: crate::camera::ScaleMode::Stretch
+    /// [`ScaleMode::Fit`]: crate::camera::ScaleMode::Fit
+    pub fn camera_for(
+        &mut self,
+        surface_size: SurfaceSize,
+        design: [f32; 2],
+        scale_mode: ScaleMode,
+    ) -> &mut Self {
+        let mut camera = Camera::orthographic_2d(design[0], design[1]);
+        camera.resize(surface_size.width as f32, surface_size.height as f32);
+
         self.camera(camera.with_scale_mode(scale_mode))
     }
 
@@ -755,17 +808,43 @@ impl Object {
     ///
     /// どれに当たったかがすでに分かっているときに。番号が無ければ `false`。
     pub fn hit_instance(&self, index: usize, x: f32, y: f32) -> bool {
-        let Some(instance) = self.instances.get(index) else {
-            return false;
-        };
+        match self.to_local(index, x, y) {
+            Some([x, y]) => self.contains(x, y),
+            None => false,
+        }
+    }
 
-        let Some(back) = self.transform().multiply(instance.transform()).inverse_2d() else {
-            return false;
-        };
-
+    /// 点を、その複製の座標へ戻す。
+    ///
+    /// [`Object::hit`] が当たりを見るのに通しているのと同じ道です。
+    /// **どこに当たったかまで知りたいとき**に使います。
+    /// 掴んだ場所からのずれを出せるので、ドラッグで図形が指に吸い付きます。
+    ///
+    /// 番号が無いときと、戻せない変換（平面でない回転、潰れた拡大）は `None`。
+    ///
+    /// ```
+    /// # use gueiz_2d::object;
+    /// # use gueiz_2d::instance::create_instance;
+    /// # use gueiz_2d::paint_type::PaintType;
+    /// # use gueiz_2d::vertex::Vertex;
+    /// let mut square = object::create_object("Square");
+    /// square.begin(PaintType::Fill);
+    /// for (x, y) in [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)] {
+    ///     square.put_vertex(Vertex::new_position_color(x, y, 0.0, 1.0, 1.0, 1.0, 1.0));
+    /// }
+    /// square.end();
+    /// square.instance(create_instance().translate(100.0, 50.0, 0.0));
+    ///
+    /// // 画面の (103, 52) は、図形の中では (3, 2)。
+    /// assert_eq!(square.to_local(0, 103.0, 52.0), Some([3.0, 2.0]));
+    /// assert_eq!(square.to_local(9, 103.0, 52.0), None, "そんな複製は無い");
+    /// ```
+    pub fn to_local(&self, index: usize, x: f32, y: f32) -> Option<[f32; 2]> {
+        let instance = self.instances.get(index)?;
+        let back = self.transform().multiply(instance.transform()).inverse_2d()?;
         let [local_x, local_y, _] = back.transform_point(x, y, 0.0);
 
-        self.contains(local_x, local_y)
+        Some([local_x, local_y])
     }
 
     /// 三角形に開いた頂点列。3 つずつで 1 枚。

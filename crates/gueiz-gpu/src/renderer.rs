@@ -111,6 +111,40 @@ impl SurfaceSize {
     pub fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
     }
+
+    /// 画面の倍率で割った、**論理ピクセル**の大きさ。
+    ///
+    /// # 何に使うか
+    ///
+    /// サーフェスの大きさは**物理ピクセル**です。OS が 125% 表示にしていれば、
+    /// 640 論理ピクセルの窓は 800 物理ピクセルで届きます。
+    ///
+    /// 物理ピクセルのまま絵を組むと、**表示倍率の違う画面で大きさが変わります**。
+    /// 125% の画面では、他のアプリの 8 割の大きさで出ます。
+    ///
+    /// これを [`Camera`](crate::camera::Camera) の基準の大きさに渡し、
+    /// [`ScaleMode`](crate::camera::ScaleMode) を相対にすると、
+    /// **1 単位 = 1 論理ピクセル**になります。`13.0` と書けばどの画面でも
+    /// OS の言う 13 と同じ大きさで出ます。
+    ///
+    /// ```
+    /// # use gueiz_gpu::renderer::SurfaceSize;
+    /// // 125% の画面に開いた 640x480 の窓。
+    /// let surface = SurfaceSize::new(800, 600);
+    ///
+    /// assert_eq!(surface.to_logical(1.25), [640.0, 480.0]);
+    /// // 倍率が分からないときは 1.0 を渡す。物理ピクセルのまま。
+    /// assert_eq!(surface.to_logical(1.0), [800.0, 600.0]);
+    /// ```
+    pub fn to_logical(self, scale_factor: f32) -> [f32; 2] {
+        // 0 や負で割ると大きさが壊れる。おかしな値は等倍として扱う。
+        let scale_factor = if scale_factor > 0.0 { scale_factor } else { 1.0 };
+
+        [
+            self.width as f32 / scale_factor,
+            self.height as f32 / scale_factor,
+        ]
+    }
 }
 
 

@@ -1,17 +1,18 @@
 use std::error::Error;
 use std::sync::Arc;
+use log::info;
 use wgpu::Color;
 use wgpu::hal::DynCommandEncoder;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ButtonSource, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 use gueiz::gpu::camera::ScaleMode;
 use gueiz::gpu::msaa::DEFAULT_MULTISAMPLE;
 use gueiz::gpu::renderer::{Renderer, RendererBackend, SurfaceSize};
 use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
-use gueiz_2d::gui::window_frame::{Gap, Quad, ThemeColor, WindowFrame, WindowTheme};
+use gueiz_2d::gui::window_frame::{DeviceId, Gap, Quad, ThemeColor, WindowFrame, WindowTheme};
 use gueiz_2d::instance::create_instance;
 use gueiz_2d::object::Object;
 
@@ -45,6 +46,12 @@ impl Application {
             renderer,
             window: None,
             scene: None,
+        }
+    }
+
+    fn request_redraw(&self) {
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
         }
     }
 
@@ -94,6 +101,9 @@ impl ApplicationHandler for Application {
 
         let size = window.surface_size();
         let surface_size = SurfaceSize::new(size.width, size.height);
+        let scale_factor = window.scale_factor() as f32;
+
+        log::info!("surface {}x{} (scale {scale_factor})", size.width, size.height);
 
         if let Err(error) = self.renderer.create_surface(window.clone(), surface_size) {
             log::error!("failed to create the surface: {error}");
@@ -101,7 +111,7 @@ impl ApplicationHandler for Application {
             return;
         }
 
-        match Scene::new(&self.renderer, surface_size) {
+        match Scene::new(&self.renderer, surface_size, scale_factor) {
             Ok(scene) => self.scene = Some(scene),
             Err(error) => {
                 log::error!("failed to build the scene: {error}");
@@ -114,7 +124,7 @@ impl ApplicationHandler for Application {
     }
 
     fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
-        match event {
+        match &event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::SurfaceResized(size) => {
@@ -126,9 +136,37 @@ impl ApplicationHandler for Application {
                 }
             }
 
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let Some(window) = self.window.as_ref() else {
+                    return;
+                };
+
+                let size = window.surface_size();
+                let surface_size = SurfaceSize::new(size.width, size.height);
+
+                self.renderer.resize(surface_size);
+
+                if let Some(scene) = self.scene.as_mut() {
+                    scene.rescale(surface_size, *scale_factor as f32);
+                }
+
+                window.request_redraw();
+            }
+
             WindowEvent::RedrawRequested => self.draw_frame(),
 
             _ => {}
+        }
+
+        // 窓が動いたら描き直す。常時回していないので、これが無いと
+        // 掴んで引いても絵が変わらない。
+        let touched = self
+            .scene
+            .as_mut()
+            .is_some_and(|scene| scene.window_event(&event));
+
+        if touched {
+            self.request_redraw();
         }
     }
 
@@ -142,10 +180,15 @@ impl ApplicationHandler for Application {
 struct Scene {
     draw_manager: DrawManager,
     window_frame: WindowFrame,
+    scale_factor: f32,
 }
 
 impl Scene {
-    fn new(renderer: &Renderer, surface_size: SurfaceSize) -> Result<Self, Box<dyn Error>> {
+    fn new(
+        renderer: &Renderer,
+        surface_size: SurfaceSize,
+        scale_factor: f32,
+    ) -> Result<Self, Box<dyn Error>> {
         let (Some(device), Some(queue), Some(format)) = (
             renderer.device(),
             renderer.queue(),
@@ -162,7 +205,7 @@ impl Scene {
         let mut draw_manager = DrawManager::new(device, queue, format, &descriptor)?;
 
         let mut window_frame = WindowFrame::new(
-            ScaleMode::Fixed,
+            ScaleMode::Stretch,
             "TestWindow1".to_string(),
             Quad {
                 x: 100.0,
@@ -170,7 +213,7 @@ impl Scene {
                 width: 500.0,
                 height: 200.0,
             },
-            20.0,
+            30.0,
             Gap {
                 x: 5.0,
                 y: 0.0,
@@ -208,16 +251,80 @@ impl Scene {
                 }
             }
         );
-        window_frame.create_object("TestWindowObject", surface_size);
+        window_frame.create_object(
+            "TestWindowObject",
+            surface_size,
+            surface_size.to_logical(scale_factor),
+        );
         window_frame.register_draw_manager(&mut draw_manager);
 
         Ok(Self {
             draw_manager,
             window_frame,
+            scale_factor,
         })
     }
 
+    /// 指の入力を窓へ渡す。**窓が受け取ったら `true`。**
+    ///
+    /// 位置はサーフェスの画素なので、そのまま渡せます。
+    /// 図形ごとの座標へ戻すのは窓の側の仕事です
+    /// （カメラが図形ごとに違うので、呼ぶ側では決められません）。
+    fn window_event(&mut self, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::PointerButton {
+                state,
+                position,
+                button,
+                ..
+            } => match (button, state) {
+                (ButtonSource::Mouse(MouseButton::Left), ElementState::Pressed) => {
+                    self.window_frame.mouse_left_pressed(
+                        &self.draw_manager,
+                        position.x as f32,
+                        position.y as f32,
+                    )
+                }
+
+                (ButtonSource::Mouse(MouseButton::Left), ElementState::Released) => {
+                    self.window_frame.mouse_left_released()
+                }
+
+                (ButtonSource::Mouse(MouseButton::Right), ElementState::Pressed) => {
+                    self.window_frame.mouse_right_pressed(
+                        &self.draw_manager,
+                        position.x as f32,
+                        position.y as f32,
+                    )
+                }
+
+                (ButtonSource::Mouse(MouseButton::Right), ElementState::Released) => {
+                    self.window_frame.mouse_right_released()
+                }
+
+                _ => false,
+            },
+
+            WindowEvent::PointerMoved { position, .. } => self.window_frame.mouse_moved(
+                &mut self.draw_manager,
+                position.x as f32,
+                position.y as f32,
+            ),
+
+            _ => false,
+        }
+    }
+
     fn resize(&mut self, surface_size: SurfaceSize) {
-        self.window_frame.resize(&mut self.draw_manager, surface_size);
+        self.window_frame.resize(
+            &mut self.draw_manager,
+            surface_size,
+            surface_size.to_logical(self.scale_factor),
+        );
+    }
+
+    fn rescale(&mut self, surface_size: SurfaceSize, scale_factor: f32) {
+        self.scale_factor = scale_factor;
+        self.resize(surface_size);
     }
 }
