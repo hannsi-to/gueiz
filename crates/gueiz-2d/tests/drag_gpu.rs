@@ -326,8 +326,8 @@ fn nothing_outside_the_window_drags() {
     assert!(!frame.mouse_left_pressed(&draw_manager, 10.0, 10.0));
     // 帯の高さより下（中身の上端のすぐ下）。
     assert!(!frame.mouse_left_pressed(&draw_manager, FRAME.0 + 5.0, FRAME.1 + TITLE_BAR + 1.0));
-    // 帯の右の外。
-    assert!(!frame.mouse_left_pressed(&draw_manager, FRAME.0 + FRAME.2 + 5.0, FRAME.1 + 5.0));
+    // 帯の右の外。縁のすぐ外は大きさを変える取っ手なので、それより外。
+    assert!(!frame.mouse_left_pressed(&draw_manager, FRAME.0 + FRAME.2 + 20.0, FRAME.1 + 5.0));
 
     assert!(!frame.is_dragging());
 }
@@ -394,4 +394,234 @@ fn it_can_be_moved_without_a_finger() {
 
     // 置いた先で掴める。
     assert!(frame.mouse_left_pressed(&draw_manager, 20.0 + 150.0, 30.0 + 15.0));
+}
+
+// ---- 縁を掴んで大きさを変える ----
+
+use gueiz_2d::gui::window_frame::{MIN_WIDTH, ResizeHandle};
+
+/// 右下の角の上。
+fn on_the_bottom_right() -> (f32, f32) {
+    (FRAME.0 + FRAME.2 + 2.0, FRAME.1 + FRAME.3 + 2.0)
+}
+
+/// 縁と角の、どこを指しているかが分かること。指の形を変えるのに使う。
+#[test]
+fn the_handles_are_found_on_the_edges_and_corners() {
+    let gpu = gpu!();
+    let (draw_manager, frame) = scene(gpu);
+
+    let (left, top) = (FRAME.0, FRAME.1);
+    let (right, bottom) = (FRAME.0 + FRAME.2, FRAME.1 + FRAME.3);
+    let (middle_x, middle_y) = (FRAME.0 + FRAME.2 / 2.0, FRAME.1 + FRAME.3 / 2.0);
+
+    let cases = [
+        ((left - 2.0, middle_y), Some(ResizeHandle::Left)),
+        ((right + 2.0, middle_y), Some(ResizeHandle::Right)),
+        ((middle_x, top - 2.0), Some(ResizeHandle::Top)),
+        ((middle_x, bottom + 2.0), Some(ResizeHandle::Bottom)),
+        ((left - 2.0, top - 2.0), Some(ResizeHandle::TopLeft)),
+        ((right + 2.0, top - 2.0), Some(ResizeHandle::TopRight)),
+        ((left - 2.0, bottom + 2.0), Some(ResizeHandle::BottomLeft)),
+        ((right + 2.0, bottom + 2.0), Some(ResizeHandle::BottomRight)),
+        // 内側も少しだけ取っ手。
+        ((right - 1.0, middle_y), Some(ResizeHandle::Right)),
+        // 帯の真ん中、中身の真ん中、ずっと外は取っ手ではない。
+        (on_the_bar(), None),
+        (on_the_body(), None),
+        ((right + 20.0, middle_y), None),
+    ];
+
+    for ((x, y), expected) in cases {
+        assert_eq!(frame.resize_handle_at(&draw_manager, x, y), expected, "({x}, {y})");
+    }
+}
+
+/// 右下の角を引くと大きくなる。**左上は動かない。**
+#[test]
+fn the_bottom_right_corner_grows_the_window() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame) = scene(gpu);
+
+    let (x, y) = on_the_bottom_right();
+    assert!(frame.mouse_left_pressed(&draw_manager, x, y), "角で掴めない");
+    assert!(frame.is_resizing());
+    assert!(!frame.is_dragging(), "大きさを変えるのに動かしている");
+
+    assert!(frame.mouse_moved(&mut draw_manager, x + 80.0, y + 60.0));
+
+    assert_eq!(frame.size(), [FRAME.2 + 80.0, FRAME.3 + 60.0]);
+    assert_eq!(frame.position(), [FRAME.0, FRAME.1]);
+
+    assert!(frame.mouse_left_released());
+    assert!(!frame.is_resizing());
+
+    // 放したあとは変わらない。
+    assert!(!frame.mouse_moved(&mut draw_manager, x + 200.0, y + 200.0));
+    assert_eq!(frame.size(), [FRAME.2 + 80.0, FRAME.3 + 60.0]);
+}
+
+/// 左の縁を引くと、**右の縁は止まったまま**左上が動く。
+#[test]
+fn the_left_edge_keeps_the_right_edge_still() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame) = scene(gpu);
+
+    let (x, y) = (FRAME.0 - 2.0, FRAME.1 + FRAME.3 / 2.0);
+    assert!(frame.mouse_left_pressed(&draw_manager, x, y));
+
+    frame.mouse_moved(&mut draw_manager, x - 50.0, y + 30.0);
+
+    let [left, top] = frame.position();
+    let [width, height] = frame.size();
+
+    assert_eq!(left, FRAME.0 - 50.0);
+    assert_eq!(left + width, FRAME.0 + FRAME.2, "右の縁が動いた");
+    // 左の縁だけなので、縦は変わらない。
+    assert_eq!((top, height), (FRAME.1, FRAME.3));
+}
+
+/// 上の縁を引くと、**下の縁は止まったまま**上が動く。
+#[test]
+fn the_top_edge_keeps_the_bottom_edge_still() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame) = scene(gpu);
+
+    let (x, y) = (FRAME.0 + FRAME.2 / 2.0, FRAME.1 - 2.0);
+    assert!(frame.mouse_left_pressed(&draw_manager, x, y));
+    assert!(frame.is_resizing(), "上の縁で動かしている");
+
+    frame.mouse_moved(&mut draw_manager, x, y + 40.0);
+
+    let [_, top] = frame.position();
+    let [_, height] = frame.size();
+
+    assert_eq!(top, FRAME.1 + 40.0);
+    assert_eq!(top + height, FRAME.1 + FRAME.3, "下の縁が動いた");
+}
+
+/// 縮めすぎても下限で止まる。左の縁で止まったときも、右の縁は動かない。
+#[test]
+fn shrinking_stops_at_the_minimum() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame) = scene(gpu);
+
+    let (x, y) = (FRAME.0 - 2.0, FRAME.1 + FRAME.3 + 2.0);
+    assert!(frame.mouse_left_pressed(&draw_manager, x, y), "左下の角で掴めない");
+
+    // 右上へ、窓よりずっと遠くまで引く。
+    frame.mouse_moved(&mut draw_manager, x + 1000.0, y - 1000.0);
+
+    let [left, _] = frame.position();
+    let [width, height] = frame.size();
+
+    assert_eq!(width, MIN_WIDTH);
+    assert_eq!(height, frame.min_height());
+    assert_eq!(left + width, FRAME.0 + FRAME.2, "右の縁が押し出された");
+
+    // 戻せば、掴んだときからの差で元の大きさに戻る。下限で止めたぶんは溜まらない。
+    frame.mouse_moved(&mut draw_manager, x, y);
+    assert_eq!(frame.size(), [FRAME.2, FRAME.3]);
+    assert_eq!(frame.position(), [FRAME.0, FRAME.1]);
+}
+
+/// **大きさを変えても図形が増えない。** 登録済みの図形の中で組み直す。
+///
+/// 登録し直すと、[`DrawManager`] には消す手立てが無いので名前が溜まる。
+#[test]
+fn resizing_does_not_register_new_objects() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame) = scene(gpu);
+
+    let before = draw_manager.object_count();
+
+    let (x, y) = on_the_bottom_right();
+    frame.mouse_left_pressed(&draw_manager, x, y);
+
+    for step in 1..=10 {
+        frame.mouse_moved(&mut draw_manager, x + step as f32 * 9.0, y + step as f32 * 4.0);
+    }
+
+    frame.mouse_left_released();
+    frame.set_size(&mut draw_manager, 200.0, 120.0);
+
+    assert_eq!(draw_manager.object_count(), before);
+}
+
+/// **絵も大きさに付いてくること。** 当たり判定だけ変わって絵が残ると困る。
+#[test]
+fn the_painted_pixels_follow_the_new_size() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame) = scene(gpu);
+
+    // 右下へ広げた先と、縮めたら外れる場所。
+    let (grown_x, grown_y) = (450, 300);
+    let (shrunk_x, shrunk_y) = (380, 240);
+
+    let before = render(gpu, &mut draw_manager);
+    assert!(!painted(&before, grown_x, grown_y), "広げる先に何かある");
+    assert!(painted(&before, shrunk_x, shrunk_y), "元の窓が描かれていない");
+
+    let (x, y) = on_the_bottom_right();
+    frame.mouse_left_pressed(&draw_manager, x, y);
+    frame.mouse_moved(&mut draw_manager, x + 80.0, y + 60.0);
+    frame.mouse_left_released();
+
+    let grown = render(gpu, &mut draw_manager);
+    assert!(painted(&grown, grown_x, grown_y), "広げた先に描かれていない");
+
+    frame.set_size(&mut draw_manager, 200.0, 100.0);
+
+    let shrunk = render(gpu, &mut draw_manager);
+    assert!(!painted(&shrunk, shrunk_x, shrunk_y), "縮めた外に残っている");
+    assert!(!painted(&shrunk, grown_x, grown_y), "広げたぶんが残っている");
+}
+
+/// 広げた帯の、**元は無かったところ**でも掴めること。
+#[test]
+fn the_grown_title_bar_can_be_grabbed() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame) = scene(gpu);
+
+    frame.set_size(&mut draw_manager, FRAME.2 + 100.0, FRAME.3);
+
+    // `pick` は三角形を見るので、組み直したら通し直す。
+    draw_manager
+        .prepare(&gpu.device, &gpu.queue)
+        .expect("支度に失敗した");
+
+    // 元の右の縁より 50 右の、帯の上。
+    let (x, y) = (FRAME.0 + FRAME.2 + 50.0, FRAME.1 + TITLE_BAR / 2.0);
+
+    assert!(frame.mouse_left_pressed(&draw_manager, x, y), "広げた帯で掴めない");
+    assert!(frame.is_dragging());
+}
+
+/// 左上を動かす縁で広げてから動かしても、掴んだ場所が指の下に留まること。
+///
+/// 形は組んだ左上を基準に組み直し、ずれはずらしで持つ。ここが食い違うと、
+/// 掴んだ瞬間に窓が飛ぶ。
+#[test]
+fn dragging_after_resizing_from_the_top_left_keeps_the_grab() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame) = scene(gpu);
+
+    let (x, y) = (FRAME.0 - 2.0, FRAME.1 - 2.0);
+    assert!(frame.mouse_left_pressed(&draw_manager, x, y));
+    frame.mouse_moved(&mut draw_manager, x - 40.0, y - 30.0);
+    frame.mouse_left_released();
+
+    draw_manager
+        .prepare(&gpu.device, &gpu.queue)
+        .expect("支度に失敗した");
+
+    let [left, top] = frame.position();
+    assert_eq!([left, top], [FRAME.0 - 40.0, FRAME.1 - 30.0]);
+
+    // 新しい左上から 20, 15 のところ（帯の上）を掴んで動かす。
+    let (grab_x, grab_y) = (left + 20.0, top + 15.0);
+    assert!(frame.mouse_left_pressed(&draw_manager, grab_x, grab_y), "広げた帯で掴めない");
+    frame.mouse_moved(&mut draw_manager, grab_x + 70.0, grab_y + 10.0);
+
+    assert_eq!(frame.position(), [left + 70.0, top + 10.0]);
 }

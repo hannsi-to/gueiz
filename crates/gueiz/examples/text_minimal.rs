@@ -20,6 +20,7 @@
 //! cargo run -p gueiz --example text_minimal
 //! ```
 
+use std::alloc::Layout;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -28,7 +29,7 @@ use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
 use gueiz_2d::font::Font;
 use gueiz_2d::msaa::DEFAULT_MULTISAMPLE;
 use gueiz_2d::renderer::{Renderer, RendererBackend, SurfaceSize};
-use gueiz_2d::text::{TextRenderer, TextStyle};
+use gueiz_2d::text::{TextLayoutData, TextLocation, TextRenderer, TextStyle};
 use gueiz_2d::wgpu;
 
 use winit::application::ApplicationHandler;
@@ -197,27 +198,38 @@ impl Scene {
         text.camera(camera_for(surface_size));
 
         text.color(1.0, 1.0, 1.0, 1.0);
-        text.write(&mut draw_manager, font, "こんにちは、世界", &TextStyle::new(48.0), 40.0, 40.0)?;
+        // text.write(&mut draw_manager, font, "こんにちは、世界", &TextStyle::new(48.0), 40.0, 40.0)?;
+        text.text_layout_data(TextLayoutData {
+            text: "こんにちは、世界".to_string(),
+            style: TextStyle::new(48.0),
+            text_location: TextLocation::Coordinate {
+                x: 40.0,
+                y: 40.0,
+            }
+        });
+        text.register_draw_manager(&mut draw_manager, font)?;
 
         text.color(0.6, 0.8, 1.0, 1.0);
-        text.write(
-            &mut draw_manager,
-            font,
-            "漢字・かな・English 0123",
-            &TextStyle::new(24.0),
-            40.0,
-            120.0,
-        )?;
+        text.text_layout_data(TextLayoutData {
+            text: "漢字・かな・English 0123".to_string(),
+            style: TextStyle::new(24.0),
+            text_location: TextLocation::Coordinate {
+                x: 40.0,
+                y: 120.0,
+            }
+        });
+        text.register_draw_manager(&mut draw_manager, font)?;
 
         text.color(0.7, 0.7, 0.7, 1.0);
-        text.write(
-            &mut draw_manager,
-            font,
-            "小さい字（13 px）も均せば途切れない",
-            &TextStyle::new(13.0),
-            40.0,
-            170.0,
-        )?;
+        text.text_layout_data(TextLayoutData {
+            text: "小さい字（13 px）も均せば途切れない".to_string(),
+            style: TextStyle::new(13.0),
+            text_location: TextLocation::Coordinate {
+                x: 40.0,
+                y: 170.0,
+            }
+        });
+        text.register_draw_manager(&mut draw_manager, font)?;
 
         Ok(Self { draw_manager, text })
     }

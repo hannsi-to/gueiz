@@ -48,6 +48,7 @@ pub enum Gueiz2DError {
         height: u32,
         pages: u32,
     },
+    MissingTextLayoutData,
 }
 
 impl Display for Gueiz2DError {
@@ -118,6 +119,9 @@ impl Display for Gueiz2DError {
                     "no room for a {}x{} image in the atlas ({} pages used)",
                     width, height, pages,
                 ))
+            }
+            Self::MissingTextLayoutData => {
+                f.write_str("there is insufficient text layout data")
             }
         }
     }

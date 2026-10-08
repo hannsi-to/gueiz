@@ -233,15 +233,15 @@ impl Scene {
         // let square = draw_manager.register(square);
 
         // let mut rect1 = Rect::new("rect1")
-            // .paint_type(PaintType::Stroke {
-            //     line_width: 50.0,
-            //     joint_type: JointType::Round,
-            //     strip: false,
-            // })
-            // .paint_type(Fill)
-            // .from(Vertex::new_position_color(100.0, 100.0, 0.0, 0.0, 0.0, 0.0, 1.0))
-            // .to(Vertex::new_position_color(300.0, 200.0, 0.0, 1.0, 1.0, 1.0, 1.0))
-            // .end();
+        //     .paint_type(PaintType::Stroke {
+        //         line_width: 50.0,
+        //         joint_type: JointType::Round,
+        //         strip: false,
+        //     })
+        //     .paint_type(Fill)
+        //     .from(Vertex::new_position_color(100.0, 100.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+        //     .to(Vertex::new_position_color(300.0, 200.0, 0.0, 1.0, 1.0, 1.0, 1.0))
+        //     .end();
         // rect1.camera(camera_for(surface_size));
         // rect1.instance(instance::create_instance());
         // draw_manager.register(rect1);

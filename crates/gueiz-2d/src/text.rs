@@ -683,6 +683,17 @@ impl TextLayout {
     }
 }
 
+pub struct TextLayoutData {
+    pub text: String,
+    pub style: TextStyle,
+    pub text_location: TextLocation,
+}
+
+pub enum TextLocation {
+    Coordinate{x: f32, y: f32},
+    Area{area: TextArea},
+}
+
 // --- 並べる ---
 
 /// 並べるのに要るフォントの情報だけを切り出したもの。
@@ -1468,6 +1479,7 @@ pub struct TextRenderer {
     camera: Camera,
     color: [f32; 4],
     z: f32,
+    text_layout_data: Option<TextLayoutData>,
 }
 
 impl TextRenderer {
@@ -1483,6 +1495,7 @@ impl TextRenderer {
             camera: Camera::default(),
             color: [1.0; 4],
             z: 0.0,
+            text_layout_data: None,
         }
     }
 
@@ -1556,6 +1569,60 @@ impl TextRenderer {
         self
     }
 
+    pub fn text_layout_data(&mut self, text_layout_data: TextLayoutData) -> &mut Self {
+        self.text_layout_data = Some(text_layout_data);
+        self
+    }
+
+    pub fn register_draw_manager(&mut self, draw_manager: &mut DrawManager, font: &Font) -> Result<TextLayout, Gueiz2DError> {
+        let text_layout_data = self.text_layout_data.take()
+            .ok_or(Gueiz2DError::MissingTextLayoutData)?;
+
+        let formatted = &Formatted::plain(text_layout_data.text.as_str());
+        let placed = match text_layout_data.text_location {
+            TextLocation::Coordinate{x, y} => {
+                let placed = layout_formatted(font, formatted, &text_layout_data.style);
+
+                self.create_glyph_and_line(draw_manager, font, &placed, &text_layout_data, x, y)?;
+
+                placed
+            }
+            TextLocation::Area{area} => {
+                let folded;
+                let formatted = match area.wrap {
+                    Some(mode) => {
+                        folded = wrap(font, formatted, &text_layout_data.style, area.width, mode);
+                        &folded
+                    }
+                    None => formatted,
+                };
+
+                let mut placed = layout_formatted(font, formatted, &text_layout_data.style);
+                placed.align_in(area.width, area.height, area.horizontal, area.vertical);
+
+                self.create_glyph_and_line(draw_manager, font, &placed, &text_layout_data, area.x, area.y)?;
+
+                placed
+            }
+        };
+
+        self.text_layout_data = Some(text_layout_data);
+
+        Ok(placed)
+    }
+
+    fn create_glyph_and_line(&mut self, draw_manager: &mut DrawManager, font: &Font, placed: &TextLayout, text_layout_data: &TextLayoutData, origin_x: f32, origin_y: f32) -> Result<(), Gueiz2DError> {
+        for glyph in &placed.glyphs {
+            self.place_glyph(draw_manager, font, &text_layout_data.style, glyph, origin_x, origin_y)?;
+        }
+
+        for line in &placed.decorations {
+            self.place_line(draw_manager, line, origin_x, origin_y)?;
+        }
+
+        Ok(())
+    }
+
     /// 文字列を `(x, y)` に置く。`y` は**上端**。書式は読まない。
     ///
     /// ```no_run
@@ -1569,6 +1636,7 @@ impl TextRenderer {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(note="Do not use this function.")]
     pub fn write(
         &mut self,
         draw_manager: &mut DrawManager,
@@ -1620,6 +1688,7 @@ impl TextRenderer {
     }
 
     /// 書式を読んで枠の中に置く。
+    #[deprecated(note="Do not use this function.")]
     pub fn write_formatted_in(
         &mut self,
         draw_manager: &mut DrawManager,
@@ -1667,6 +1736,7 @@ impl TextRenderer {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(note="Do not use this function.")]
     pub fn write_formatted(
         &mut self,
         draw_manager: &mut DrawManager,

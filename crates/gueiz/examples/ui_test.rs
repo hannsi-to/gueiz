@@ -4,6 +4,7 @@ use log::info;
 use wgpu::Color;
 use wgpu::hal::DynCommandEncoder;
 use winit::application::ApplicationHandler;
+use winit::cursor::CursorIcon;
 use winit::dpi::LogicalSize;
 use winit::event::{ButtonSource, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -12,7 +13,7 @@ use gueiz::gpu::camera::ScaleMode;
 use gueiz::gpu::msaa::DEFAULT_MULTISAMPLE;
 use gueiz::gpu::renderer::{Renderer, RendererBackend, SurfaceSize};
 use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
-use gueiz_2d::gui::window_frame::{DeviceId, Gap, Quad, ThemeColor, WindowFrame, WindowTheme};
+use gueiz_2d::gui::window_frame::{DeviceId, Gap, Quad, ResizeHandle, ThemeColor, WindowFrame, WindowTheme};
 use gueiz_2d::instance::create_instance;
 use gueiz_2d::object::Object;
 
@@ -35,6 +36,8 @@ struct Application {
     renderer: Renderer,
     window: Option<Arc<dyn Window>>,
     scene: Option<Scene>,
+    /// いま出している指の形。変わったときだけ窓に伝える。
+    cursor: CursorIcon,
 }
 
 impl Application {
@@ -46,6 +49,33 @@ impl Application {
             renderer,
             window: None,
             scene: None,
+            cursor: CursorIcon::Default,
+        }
+    }
+
+    /// 窓の縁の上なら、大きさを変える形の指にする。
+    ///
+    /// 引いているあいだは変えない。指が縁から外れても、引いている向きの形のままにする。
+    fn update_cursor(&mut self, x: f32, y: f32) {
+        let (Some(window), Some(scene)) = (self.window.as_ref(), self.scene.as_ref()) else {
+            return;
+        };
+
+        if scene.window_frame.is_resizing() {
+            return;
+        }
+
+        let cursor = match scene.window_frame.resize_handle_at(&scene.draw_manager, x, y) {
+            Some(ResizeHandle::Left | ResizeHandle::Right) => CursorIcon::EwResize,
+            Some(ResizeHandle::Top | ResizeHandle::Bottom) => CursorIcon::NsResize,
+            Some(ResizeHandle::TopLeft | ResizeHandle::BottomRight) => CursorIcon::NwseResize,
+            Some(ResizeHandle::TopRight | ResizeHandle::BottomLeft) => CursorIcon::NeswResize,
+            None => CursorIcon::Default,
+        };
+
+        if cursor != self.cursor {
+            window.set_cursor(cursor.into());
+            self.cursor = cursor;
         }
     }
 
@@ -167,6 +197,10 @@ impl ApplicationHandler for Application {
 
         if touched {
             self.request_redraw();
+        }
+
+        if let WindowEvent::PointerMoved { position, .. } = &event {
+            self.update_cursor(position.x as f32, position.y as f32);
         }
     }
 

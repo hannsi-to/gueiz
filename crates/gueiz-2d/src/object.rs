@@ -124,6 +124,11 @@ impl Object {
         self
     }
 
+    /// いまの塗り方。[`Object::begin`] で決めたもの。
+    pub fn paint_type(&self) -> PaintType {
+        self.paint_type
+    }
+
     /// ここから先の頂点を**穴**として記録する。何個でも開けられる。
     ///
     /// [`PaintType::Fill`] なら外周から抜かれ、[`PaintType::Stroke`] なら

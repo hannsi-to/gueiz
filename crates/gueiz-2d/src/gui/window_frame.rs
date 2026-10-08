@@ -17,10 +17,17 @@ use crate::objects::polygon_rounded::CornerType;
 use crate::objects::rect::Rect;
 use crate::objects::rect_rounded::RectRounded;
 use crate::paint_type::{JointType, PaintType};
-use crate::text::{TextAlign, TextArea, TextRenderer, TextStyle};
+use crate::text::{TextAlign, TextArea, TextLayoutData, TextLocation, TextRenderer, TextStyle};
 
 const CORNER_RADIUS: f32 = 10.0;
 const LINE_WIDTH: f32 = 1.0;
+
+/// 縮められる幅の下限。
+pub const MIN_WIDTH: f32 = 120.0;
+/// 縁の**外側**で、大きさを変える取っ手になる幅。
+const HANDLE_OUTSIDE: f32 = 6.0;
+/// 縁の**内側**で、取っ手になる幅。広くすると、帯の端で掴みにくくなる。
+const HANDLE_INSIDE: f32 = 3.0;
 
 pub struct WindowFrame {
     scale_mode: ScaleMode,
@@ -45,6 +52,8 @@ pub struct WindowFrame {
     built_origin: [f32; 2],
     /// 掴んでいるあいだだけ。
     drag: Option<Drag>,
+    /// 縁を引いているあいだだけ。
+    resize: Option<Resize>,
     hidden: bool,
 }
 
@@ -58,11 +67,53 @@ struct Drag {
     grab: [f32; 2],
 }
 
+/// 縁を引いているあいだの覚え。
+struct Resize {
+    handle: ResizeHandle,
+    /// 掴んだときの窓。**いまの窓からではなく、ここからの差で決める。**
+    /// 下限で止めたぶんが溜まらないので、戻せば元の大きさに戻る。
+    start_quad: Quad,
+    /// 掴んだ場所。
+    start: [f32; 2],
+}
+
+/// 大きさを変える取っ手。縁と角。
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum ResizeHandle {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl ResizeHandle {
+    fn moves_left(self) -> bool {
+        matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
+    }
+
+    fn moves_right(self) -> bool {
+        matches!(self, Self::Right | Self::TopRight | Self::BottomRight)
+    }
+
+    fn moves_top(self) -> bool {
+        matches!(self, Self::Top | Self::TopLeft | Self::TopRight)
+    }
+
+    fn moves_bottom(self) -> bool {
+        matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
+    }
+}
+
 struct RegisterName {
     pub frame: Option<String>,
     pub title_bar: Option<String>,
     pub frame_outline: Option<String>,
     pub title_bar_slice_line: Option<String>,
+    pub text_title: Option<String>,
 }
 
 pub struct WindowTheme {
@@ -93,8 +144,11 @@ impl WindowFrame {
             title_bar_height,
             gap,
             window_font: WindowFont {
-                // base_font_path: "C:/Windows/Fonts/YuGothM.ttc".to_string(),
-                base_font_path: "/System/Library/Fonts/Avenir Next.ttc".to_string(),
+                base_font_path: if cfg!(target_os = "windows") {
+                    "C:/Windows/Fonts/YuGothM.ttc".to_string()
+                } else {
+                    "/System/Library/Fonts/Avenir Next.ttc".to_string()
+                },
             },
             window_theme,
             frame: None,
@@ -107,9 +161,11 @@ impl WindowFrame {
                 title_bar: None,
                 frame_outline: None,
                 title_bar_slice_line: None,
+                text_title: None,
             },
             built_origin: [0.0; 2],
             drag: None,
+            resize: None,
             hidden: false,
         }
     }
@@ -121,61 +177,110 @@ impl WindowFrame {
         let register_name_string = register_name.to_string();
 
         self.register_name.frame = Some(register_name_string.clone());
-        let mut frame = RectRounded::new(register_name)
-            .paint_type(PaintType::Fill)
-            .vertex1(CornerType::None {}, Vertex::new_position_color(self.frame_quad.x,self.frame_quad.y + self.title_bar_height,0.0,self.window_theme.frame_fill_color.r,self.window_theme.frame_fill_color.g,self.window_theme.frame_fill_color.b,self.window_theme.frame_fill_color.a))
-            .vertex2(CornerType::None {}, Vertex::new_position_color(self.frame_quad.x + self.frame_quad.width,self.frame_quad.y + self.title_bar_height,0.0,self.window_theme.frame_fill_color.r,self.window_theme.frame_fill_color.g,self.window_theme.frame_fill_color.b,self.window_theme.frame_fill_color.a))
-            .vertex3(CornerType::Circle {radius: CORNER_RADIUS}, Vertex::new_position_color(self.frame_quad.x + self.frame_quad.width,self.frame_quad.y + self.frame_quad.height,0.0,self.window_theme.frame_fill_color.r,self.window_theme.frame_fill_color.g,self.window_theme.frame_fill_color.b,self.window_theme.frame_fill_color.a))
-            .vertex4(CornerType::Circle {radius: CORNER_RADIUS}, Vertex::new_position_color(self.frame_quad.x,self.frame_quad.y + self.frame_quad.height,0.0,self.window_theme.frame_fill_color.r,self.window_theme.frame_fill_color.g,self.window_theme.frame_fill_color.b,self.window_theme.frame_fill_color.a))
-            .end();
-        frame.camera_for(surface_size, design, self.scale_mode);
-        frame.instance(create_instance());
+        self.register_name.title_bar = Some(format!("{register_name_string}-title_bar"));
+        self.register_name.frame_outline = Some(format!("{register_name_string}-frame_outline"));
+        self.register_name.title_bar_slice_line = Some(format!("{register_name_string}-title_bar_slice_line"));
 
-        let mut register_name_title_bar = register_name_string.clone();
-        register_name_title_bar.push_str("-title_bar");
-        self.register_name.title_bar = Some(register_name_title_bar);
-        let mut title_bar = RectRounded::new(self.register_name.title_bar.clone().unwrap().as_str())
-            .paint_type(PaintType::Fill)
-            .vertex1(CornerType::Circle {radius: CORNER_RADIUS}, Vertex::new_position_color(self.frame_quad.x, self.frame_quad.y, 0.0, self.window_theme.title_bar_fill_color.r, self.window_theme.title_bar_fill_color.g, self.window_theme.title_bar_fill_color.b, self.window_theme.title_bar_fill_color.a))
-            .vertex2(CornerType::Circle {radius: CORNER_RADIUS}, Vertex::new_position_color(self.frame_quad.x + self.frame_quad.width, self.frame_quad.y, 0.0, self.window_theme.title_bar_fill_color.r, self.window_theme.title_bar_fill_color.g, self.window_theme.title_bar_fill_color.b, self.window_theme.title_bar_fill_color.a))
-            .vertex3(CornerType::None{}, Vertex::new_position_color(self.frame_quad.x + self.frame_quad.width, self.frame_quad.y + self.title_bar_height, 0.0, self.window_theme.title_bar_fill_color.r, self.window_theme.title_bar_fill_color.g, self.window_theme.title_bar_fill_color.b, self.window_theme.title_bar_fill_color.a))
-            .vertex4(CornerType::None{}, Vertex::new_position_color(self.frame_quad.x, self.frame_quad.y + self.title_bar_height, 0.0, self.window_theme.title_bar_fill_color.r, self.window_theme.title_bar_fill_color.g, self.window_theme.title_bar_fill_color.b, self.window_theme.title_bar_fill_color.a))
-            .end();
-        title_bar.camera_for(surface_size, design, self.scale_mode);
-        title_bar.instance(create_instance());
+        let [mut frame, mut title_bar, mut frame_outline, mut title_bar_slice_line] = self.build_shapes();
 
-        let mut register_name_frame_outline = register_name_string.clone();
-        register_name_frame_outline.push_str("-frame_outline");
-        self.register_name.frame_outline = Some(register_name_frame_outline);
-        let mut frame_outline = RectRounded::new(self.register_name.frame_outline.clone().unwrap().as_str())
-            .paint_type(PaintType::Stroke {line_width: LINE_WIDTH, joint_type: JointType::Bevel, strip: false, dash: None})
-            .from(CornerType::Circle {radius: CORNER_RADIUS}, Vertex::new_position_color(self.frame_quad.x, self.frame_quad.y,0.0, self.window_theme.frame_outline_color.r,self.window_theme.frame_outline_color.g, self.window_theme.frame_outline_color.b,self.window_theme.frame_outline_color.a))
-            .to_wh(Vertex::new_position_color(self.frame_quad.width, self.frame_quad.height,0.0, self.window_theme.frame_outline_color.r,self.window_theme.frame_outline_color.g, self.window_theme.frame_outline_color.b,self.window_theme.frame_outline_color.a))
-            .end();
-        frame_outline.camera_for(surface_size, design, self.scale_mode);
-        frame_outline.instance(create_instance());
+        for object in [&mut frame, &mut title_bar, &mut frame_outline, &mut title_bar_slice_line] {
+            object.camera_for(surface_size, design, self.scale_mode);
+            object.instance(create_instance());
+        }
 
-        let mut register_name_title_bar_slice_line = register_name_string.clone();
-        register_name_title_bar_slice_line.push_str("-title_bar_slice_line");
-        self.register_name.title_bar_slice_line = Some(register_name_title_bar_slice_line);
-        let mut title_bar_slice_line = Lines::new(self.register_name.title_bar_slice_line.clone().unwrap().as_str())
-            .paint_type(PaintType::Stroke {line_width: LINE_WIDTH, joint_type: JointType::None, strip: false, dash: None})
-            .curve_type(CurveRepresentationType::Normal)
-            .point(Vertex::new_position_color(self.frame_quad.x + self.gap.x, self.frame_quad.y + self.title_bar_height, 0.0, self.window_theme.title_bar_slice_line_color.r, self.window_theme.title_bar_slice_line_color.g,self.window_theme.title_bar_slice_line_color.b,self.window_theme.title_bar_slice_line_color.a))
-            .last_point(Vertex::new_position_color(self.frame_quad.x - self.gap.x + self.frame_quad.width, self.frame_quad.y + self.title_bar_height, 0.0, self.window_theme.title_bar_slice_line_color.r, self.window_theme.title_bar_slice_line_color.g,self.window_theme.title_bar_slice_line_color.b,self.window_theme.title_bar_slice_line_color.a))
-            .end();
-        title_bar_slice_line.camera_for(surface_size, design, self.scale_mode);
-        title_bar_slice_line.instance(create_instance());
-
-        let mut text_title = TextRenderer::new(&format!("{register_name_string}-text_title"));
+        let mut register_name_text_title = register_name_string.clone();
+        register_name_text_title.push_str("-text_title");
+        self.register_name.text_title = Some(register_name_text_title);
+        let mut text_title = TextRenderer::new(self.register_name.text_title.clone().unwrap().as_str());
         text_title.camera_for(surface_size, design, self.scale_mode);
         text_title.color(self.window_theme.text_title_color.r,self.window_theme.text_title_color.g,self.window_theme.text_title_color.b,self.window_theme.text_title_color.a);
+        text_title.text_layout_data(TextLayoutData {
+            text: self.title.clone(),
+            style: TextStyle::new(13.0),
+            text_location: TextLocation::Area {
+                area: TextArea::new(self.frame_quad.x + self.gap.x, self.frame_quad.y, self.frame_quad.width - (self.gap.x * 2.0), self.title_bar_height)
+                    .vertical(TextAlign::Center),
+            },
+        });
 
         self.frame = Some(frame);
         self.title_bar = Some(title_bar);
         self.frame_outline = Some(frame_outline);
         self.title_bar_slice_line = Some(title_bar_slice_line);
         self.text_title = Some(text_title);
+    }
+
+    /// 枠・帯・縁取り・区切り線の形を組む。
+    ///
+    /// **組んだときの左上（`built_origin`）に、いまの大きさで組みます。**
+    /// 置き場所のずれは [`Object::translate`] で持つので、ここには入れません。
+    /// 名前は [`WindowFrame::create_object`] で決めたものを使います。
+    fn build_shapes(&self) -> [Object; 4] {
+        let [x, y] = self.built_origin;
+        let width = self.frame_quad.width;
+        let height = self.frame_quad.height;
+        let theme = &self.window_theme;
+
+        let name = |name: &Option<String>| name.clone().unwrap_or_default();
+        let vertex = |x: f32, y: f32, color: &ThemeColor| {
+            Vertex::new_position_color(x, y, 0.0, color.r, color.g, color.b, color.a)
+        };
+
+        let frame = RectRounded::new(&name(&self.register_name.frame))
+            .paint_type(PaintType::Fill)
+            .vertex1(CornerType::None {}, vertex(x, y + self.title_bar_height, &theme.frame_fill_color))
+            .vertex2(CornerType::None {}, vertex(x + width, y + self.title_bar_height, &theme.frame_fill_color))
+            .vertex3(CornerType::Circle {radius: CORNER_RADIUS}, vertex(x + width, y + height, &theme.frame_fill_color))
+            .vertex4(CornerType::Circle {radius: CORNER_RADIUS}, vertex(x, y + height, &theme.frame_fill_color))
+            .end();
+
+        let title_bar = RectRounded::new(&name(&self.register_name.title_bar))
+            .paint_type(PaintType::Fill)
+            .vertex1(CornerType::Circle {radius: CORNER_RADIUS}, vertex(x, y, &theme.title_bar_fill_color))
+            .vertex2(CornerType::Circle {radius: CORNER_RADIUS}, vertex(x + width, y, &theme.title_bar_fill_color))
+            .vertex3(CornerType::None {}, vertex(x + width, y + self.title_bar_height, &theme.title_bar_fill_color))
+            .vertex4(CornerType::None {}, vertex(x, y + self.title_bar_height, &theme.title_bar_fill_color))
+            .end();
+
+        let frame_outline = RectRounded::new(&name(&self.register_name.frame_outline))
+            .paint_type(PaintType::Stroke {line_width: LINE_WIDTH, joint_type: JointType::Bevel, strip: false, dash: None})
+            .from(CornerType::Circle {radius: CORNER_RADIUS}, vertex(x, y, &theme.frame_outline_color))
+            .to_wh(vertex(width, height, &theme.frame_outline_color))
+            .end();
+
+        let title_bar_slice_line = Lines::new(&name(&self.register_name.title_bar_slice_line))
+            .paint_type(PaintType::Stroke {line_width: LINE_WIDTH, joint_type: JointType::None, strip: false, dash: None})
+            .curve_type(CurveRepresentationType::Normal)
+            .point(vertex(x + self.gap.x, y + self.title_bar_height, &theme.title_bar_slice_line_color))
+            .last_point(vertex(x - self.gap.x + width, y + self.title_bar_height, &theme.title_bar_slice_line_color))
+            .end();
+
+        [frame, title_bar, frame_outline, title_bar_slice_line]
+    }
+
+    /// いまの大きさで形を組み直し、**登録済みの図形の中に**入れ直す。
+    ///
+    /// 登録し直すと [`DrawManager`] に名前が溜まるので、頂点だけを差し替えます。
+    /// カメラ・複製・ずらしは図形に残ったままです。
+    fn rebuild_shapes(&self, draw_manager: &mut DrawManager) {
+        let names = [
+            self.register_name.frame.as_ref(),
+            self.register_name.title_bar.as_ref(),
+            self.register_name.frame_outline.as_ref(),
+            self.register_name.title_bar_slice_line.as_ref(),
+        ];
+
+        for (name, built) in names.into_iter().zip(self.build_shapes()) {
+            let Some(object) = name.and_then(|name| draw_manager.object_mut(name)) else {
+                continue;
+            };
+
+            object.begin(built.paint_type());
+            for vertex in built.vertices() {
+                object.put_vertex(*vertex);
+            }
+            object.end();
+        }
     }
 
     pub fn register_draw_manager(&mut self, draw_manager: &mut DrawManager) {
@@ -191,19 +296,29 @@ impl WindowFrame {
         if let Some(title_bar_slice_line) = self.title_bar_slice_line.take() {
             draw_manager.register(title_bar_slice_line);
         }
+        // 題名が無ければ書体は読まない。書体の無い環境でも枠だけは出せる。
+        if self.title.is_empty() {
+            return;
+        }
         if let Some(text_title) = self.text_title.as_mut() {
-            let data = std::fs::read(self.window_font.base_font_path.clone());
-            let font = Font::from_bytes(data.unwrap().leak()).unwrap();
-            text_title
-                .write_in(
-                    draw_manager,
-                    &font,
-                    &self.title,
-                    &TextStyle::new(13.0),
-                    TextArea::new(self.frame_quad.x + self.gap.x, self.frame_quad.y, self.frame_quad.width - (self.gap.x * 2.0), self.title_bar_height)
-                        .vertical(TextAlign::Center),
-                )
-                .expect("TODO: panic message");
+            let path = &self.window_font.base_font_path;
+
+            let data = match std::fs::read(path) {
+                Ok(data) => data,
+                Err(error) => {
+                    log::warn!("failed to read the font '{path}': {error}; the title is not drawn");
+                    return;
+                }
+            };
+            let font = match Font::from_bytes(data.leak()) {
+                Ok(font) => font,
+                Err(error) => {
+                    log::warn!("failed to load the font '{path}': {error}; the title is not drawn");
+                    return;
+                }
+            };
+
+            text_title.register_draw_manager(draw_manager, &font).expect("Failed to register draw manager");
         }
     }
 
@@ -257,6 +372,115 @@ impl WindowFrame {
     /// 掴んでいるか。
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    // --- 大きさを変える ---
+
+    /// いまの幅と高さ。
+    pub fn size(&self) -> [f32; 2] {
+        [self.frame_quad.width, self.frame_quad.height]
+    }
+
+    /// 縮められる高さの下限。帯と、下の丸い角が収まるぶん。
+    pub fn min_height(&self) -> f32 {
+        self.title_bar_height + CORNER_RADIUS * 2.0
+    }
+
+    /// 大きさを決める。左上は動きません。下限より小さくはなりません。
+    ///
+    /// 題名の字は組み直しません。左寄せなので、幅が変わっても置き場所は同じです。
+    pub fn set_size(&mut self, draw_manager: &mut DrawManager, width: f32, height: f32) {
+        self.frame_quad.width = width.max(MIN_WIDTH);
+        self.frame_quad.height = height.max(self.min_height());
+
+        self.rebuild_shapes(draw_manager);
+    }
+
+    /// 縁を引いているか。
+    pub fn is_resizing(&self) -> bool {
+        self.resize.is_some()
+    }
+
+    /// その画素の位置が、どの取っ手の上か。指の形を変えるのに使います。
+    ///
+    /// 取っ手は縁の外側に [`HANDLE_OUTSIDE`]、内側に [`HANDLE_INSIDE`] の幅です。
+    /// 窓の内側の取っ手は、**手前にあるものが自分のものの時だけ**取ります。
+    /// 別の窓がかぶさっているなら、そちらの中身です。
+    pub fn resize_handle_at(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<ResizeHandle> {
+        let [world_x, world_y] = self.to_world(draw_manager, x, y)?;
+
+        let quad = &self.frame_quad;
+        let (left, top) = (quad.x, quad.y);
+        let (right, bottom) = (quad.x + quad.width, quad.y + quad.height);
+
+        // 取っ手まで含めた外枠の外なら、どれでもない。
+        if world_x < left - HANDLE_OUTSIDE
+            || world_x > right + HANDLE_OUTSIDE
+            || world_y < top - HANDLE_OUTSIDE
+            || world_y > bottom + HANDLE_OUTSIDE
+        {
+            return None;
+        }
+
+        let near_left = world_x <= left + HANDLE_INSIDE;
+        let near_right = world_x >= right - HANDLE_INSIDE;
+        let near_top = world_y <= top + HANDLE_INSIDE;
+        let near_bottom = world_y >= bottom - HANDLE_INSIDE;
+
+        let handle = match (near_left, near_right, near_top, near_bottom) {
+            (true, _, true, _) => ResizeHandle::TopLeft,
+            (_, true, true, _) => ResizeHandle::TopRight,
+            (true, _, _, true) => ResizeHandle::BottomLeft,
+            (_, true, _, true) => ResizeHandle::BottomRight,
+            (true, _, _, _) => ResizeHandle::Left,
+            (_, true, _, _) => ResizeHandle::Right,
+            (_, _, true, _) => ResizeHandle::Top,
+            (_, _, _, true) => ResizeHandle::Bottom,
+            _ => return None,
+        };
+
+        if quad.hover(world_x, world_y) {
+            match draw_manager.pick(x, y) {
+                Some(pick) if self.owns(&pick.name) => {}
+                _ => return None,
+            }
+        }
+
+        Some(handle)
+    }
+
+    /// 掴んだときの窓から、指が `delta` 動いたときの窓。
+    fn resized_quad(&self, resize: &Resize, delta: [f32; 2]) -> Quad {
+        let start = &resize.start_quad;
+        let handle = resize.handle;
+        let min_height = self.min_height();
+
+        let mut quad = Quad {
+            x: start.x,
+            y: start.y,
+            width: start.width,
+            height: start.height,
+        };
+
+        // 左と上は、**向かいの縁を止めたまま**動かす。
+        if handle.moves_left() {
+            let right = start.x + start.width;
+            quad.x = (start.x + delta[0]).min(right - MIN_WIDTH);
+            quad.width = right - quad.x;
+        }
+        if handle.moves_right() {
+            quad.width = (start.width + delta[0]).max(MIN_WIDTH);
+        }
+        if handle.moves_top() {
+            let bottom = start.y + start.height;
+            quad.y = (start.y + delta[1]).min(bottom - min_height);
+            quad.height = bottom - quad.y;
+        }
+        if handle.moves_bottom() {
+            quad.height = (start.height + delta[1]).max(min_height);
+        }
+
+        quad
     }
 
     /// 題名の帯。局所ではなく**いまの置き場所**での矩形。
@@ -339,6 +563,24 @@ impl WindowFrame {
             return false;
         };
 
+        // 縁の上なら、動かすより先に大きさを変える。帯の端も縁なので、こちらが勝つ。
+        if let Some(handle) = self.resize_handle_at(draw_manager, x, y) {
+            let quad = &self.frame_quad;
+
+            self.resize = Some(Resize {
+                handle,
+                start_quad: Quad {
+                    x: quad.x,
+                    y: quad.y,
+                    width: quad.width,
+                    height: quad.height,
+                },
+                start: world,
+            });
+
+            return true;
+        }
+
         // 帯の上か。**手前にあるものが自分のものか**も見る。
         // 別の窓がかぶさっているなら、そちらが取るべき。
         if !self.title_bar_quad().hover(world[0], world[1]) {
@@ -358,9 +600,12 @@ impl WindowFrame {
         true
     }
 
-    /// 左を放した。掴んでいたら `true`。
+    /// 左を放した。掴んでいたか、縁を引いていたら `true`。
     pub fn mouse_left_released(&mut self) -> bool {
-        self.drag.take().is_some()
+        let dragged = self.drag.take().is_some();
+        let resized = self.resize.take().is_some();
+
+        dragged || resized
     }
 
     pub fn mouse_right_pressed(&mut self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
@@ -377,6 +622,10 @@ impl WindowFrame {
     /// **枠の外へ出ても離しません。** 放すまでは動かし続けます。
     /// 離すと、少し外れた瞬間に窓が置き去りになります。
     pub fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+        if self.resize.is_some() {
+            return self.resize_moved(draw_manager, x, y);
+        }
+
         let Some(drag) = self.drag.as_ref() else {
             return false;
         };
@@ -393,6 +642,36 @@ impl WindowFrame {
         self.frame_quad.y = world[1] - grab[1];
 
         self.apply_offset(draw_manager);
+
+        true
+    }
+
+    /// 縁を引いている指が動いた。[`WindowFrame::mouse_moved`] からだけ呼ぶ。
+    ///
+    /// 動かすときと同じく、枠の外へ出ても放すまでは付いてきます。
+    fn resize_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+        let Some(world) = self.to_world(draw_manager, x, y) else {
+            return false;
+        };
+        let Some(resize) = self.resize.as_ref() else {
+            return false;
+        };
+
+        let delta = [world[0] - resize.start[0], world[1] - resize.start[1]];
+        let quad = self.resized_quad(resize, delta);
+
+        let moved = quad.x != self.frame_quad.x || quad.y != self.frame_quad.y;
+        let sized = quad.width != self.frame_quad.width || quad.height != self.frame_quad.height;
+
+        self.frame_quad = quad;
+
+        if sized {
+            self.rebuild_shapes(draw_manager);
+        }
+        // 左や上の縁は左上も動く。形は組んだ左上で組み直すので、ずらしで合わせる。
+        if moved {
+            self.apply_offset(draw_manager);
+        }
 
         true
     }
