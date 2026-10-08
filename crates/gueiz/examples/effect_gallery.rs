@@ -953,7 +953,7 @@ impl Scene {
             label_spots.push((tile.label, column * CELL + 6.0, y + TILE + 4.0));
         }
 
-        let mut text = TextRenderer::new();
+        let mut text = TextRenderer::new("labels");
         text.camera(camera);
         // 図形より手前に置く。
         text.z(1.0);

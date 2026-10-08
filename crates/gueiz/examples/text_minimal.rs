@@ -3,7 +3,7 @@
 //! ```rust,ignore
 //! let font = Font::from_bytes(&data)?;
 //!
-//! let mut text = TextRenderer::new();
+//! let mut text = TextRenderer::new("text");
 //! text.camera(Camera::orthographic_2d(width, height));
 //! text.color(1.0, 1.0, 1.0, 1.0);
 //! text.write(&mut draw_manager, &font, "こんにちは、世界", &TextStyle::new(48.0), 40.0, 40.0)?;
@@ -191,7 +191,8 @@ impl Scene {
         };
         let mut draw_manager = DrawManager::new(device, queue, format, &descriptor)?;
 
-        let mut text = TextRenderer::new();
+        // 他の図形と同じく、名前をつけて作る。字の形はこの名前を頭につけて登録される。
+        let mut text = TextRenderer::new("text");
         // カメラは字の形を作る前に決める。
         text.camera(camera_for(surface_size));
 

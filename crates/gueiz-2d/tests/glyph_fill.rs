@@ -235,7 +235,7 @@ fn the_text_renderer_fills_glyphs_by_their_winding() {
         DrawManager::new(&gpu.device, &gpu.queue, FORMAT, &DrawManagerDescriptor::default())
             .expect("DrawManager を作れなかった");
 
-    let mut text = TextRenderer::new();
+    let mut text = TextRenderer::new("text");
     text.write(&mut manager, &font, SAMPLE, &TextStyle::new(48.0), 0.0, 0.0)
         .expect("書けなかった");
 
@@ -245,8 +245,8 @@ fn the_text_renderer_fills_glyphs_by_their_winding() {
         let glyph = font.glyph(character).expect("見本の字は入っている");
         let outline = font.outline(glyph, DEFAULT_TOLERANCE).expect("形がある");
 
-        // 形の名前は「Glyph <番号> ...」。番号で引き当てる。
-        let prefix = format!("Glyph {} ", glyph.0);
+        // 形の名前は「<名前> Glyph <番号> ...」。番号で引き当てる。
+        let prefix = format!("{} Glyph {} ", text.name(), glyph.0);
         let name = text
             .shape_ids()
             .find(|name| name.starts_with(&prefix))

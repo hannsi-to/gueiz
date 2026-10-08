@@ -328,7 +328,7 @@ fn render_with_samples(
         },
     )?;
 
-    let mut renderer = TextRenderer::new();
+    let mut renderer = TextRenderer::new("text");
     renderer
         .camera(Camera::orthographic_2d(SIZE as f32, SIZE as f32))
         .color(1.0, 1.0, 1.0, 1.0);

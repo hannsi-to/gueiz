@@ -394,7 +394,7 @@ impl TextAlign {
 /// # use gueiz_2d::font::Font;
 /// # use gueiz_2d::text::{TextAlign, TextArea, TextRenderer, TextStyle};
 /// # fn run(font: &Font, draw_manager: &mut DrawManager) -> Result<(), Box<dyn std::error::Error>> {
-/// let mut text = TextRenderer::new();
+/// let mut text = TextRenderer::new("text");
 ///
 /// // 100,100 から 400x200 の枠の、まん中に置く。
 /// text.write_in(
@@ -1458,6 +1458,9 @@ enum ShapeKey {
 /// 毎フレーム呼ぶなら、先に [`TextRenderer::clear`] でインスタンスを
 /// 空にしてください。形は残るので、作り直しは起きません。
 pub struct TextRenderer {
+    /// 登録する形の名前の頭につける名前。他の図形の名前と同じく、
+    /// [`DrawManager`] の中で `TextRenderer` どうしを見分けるのに使う。
+    name: String,
     /// 形の鍵 → 登録した名前。**名前を持つのは、引くたびに
     /// 作り直さないため。** 貸し出しは `&str` で返すので、
     /// 1 文字ごとに確保が起きることはない。
@@ -1467,15 +1470,15 @@ pub struct TextRenderer {
     z: f32,
 }
 
-impl Default for TextRenderer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TextRenderer {
-    pub fn new() -> Self {
+    /// 名前をつけて作る。字の形はこの名前を頭につけて登録される
+    /// （例えば `"title"` なら `"title Glyph 42 skew0 Glyph"`）。
+    ///
+    /// [`Rect::new`](crate::objects::rect::Rect::new) などと同じく、
+    /// 名前は [`DrawManager`] の中でひとつにしてください。
+    pub fn new(name: &str) -> Self {
         Self {
+            name: String::from(name),
             shapes: FxHashMap::default(),
             camera: Camera::default(),
             color: [1.0; 4],
@@ -1508,6 +1511,11 @@ impl TextRenderer {
         camera.resize(surface_size.width as f32, surface_size.height as f32);
 
         self.camera(camera.with_scale_mode(scale_mode))
+    }
+
+    /// 作るときにつけた名前。
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// 登録済みの形。カメラを貼り直したいときなどに。
@@ -1555,7 +1563,7 @@ impl TextRenderer {
     /// # use gueiz_2d::draw_manager::DrawManager;
     /// # use gueiz_2d::text::{TextRenderer, TextStyle};
     /// # fn run(font: &Font, draw_manager: &mut DrawManager) -> Result<(), gueiz_2d::error::Gueiz2DError> {
-    /// let mut text = TextRenderer::new();
+    /// let mut text = TextRenderer::new("text");
     /// text.color(1.0, 1.0, 1.0, 1.0);
     /// text.write(draw_manager, font, "Hello", &TextStyle::new(48.0), 100.0, 100.0)?;
     /// # Ok(())
@@ -1585,7 +1593,7 @@ impl TextRenderer {
     /// # use gueiz_2d::font::Font;
     /// # use gueiz_2d::text::{TextArea, TextRenderer, TextStyle};
     /// # fn run(font: &Font, draw_manager: &mut DrawManager) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut text = TextRenderer::new();
+    /// let mut text = TextRenderer::new("text");
     ///
     /// let placed = text.write_in(
     ///     draw_manager,
@@ -1654,7 +1662,7 @@ impl TextRenderer {
     /// # fn run(font: &Font, draw_manager: &mut DrawManager) -> Result<(), Box<dyn std::error::Error>> {
     /// let formatted = Formatted::parse("§[gold]§[bold]勝利§[/]§[ln]§[underline]次へ")?;
     ///
-    /// let mut text = TextRenderer::new();
+    /// let mut text = TextRenderer::new("text");
     /// text.write_formatted(draw_manager, font, &formatted, &TextStyle::new(48.0), 16.0, 16.0)?;
     /// # Ok(())
     /// # }
@@ -1976,7 +1984,10 @@ impl TextRenderer {
 
         // 名前は形の鍵から組む。登録先は名前をひとつに保つので、
         // ここで重ねると付け替えられて、当てにできなくなる。
-        let mut object = object::create_object(&format!("Glyph {} skew{} {:?}", glyph.0, skew, layer));
+        let mut object = object::create_object(&format!(
+            "{} Glyph {} skew{} {:?}",
+            self.name, glyph.0, skew, layer
+        ));
 
         let skew = skew as f32 / SKEW_STEPS;
         // 字形は輪郭の向きで塗る。日本語のフォントは画ごとの輪郭を重ねて
@@ -2060,7 +2071,7 @@ impl TextRenderer {
         };
 
         // 段ごとに別の図形なので、名前にも段を入れる。
-        let mut object = object::create_object(&format!("{name} {layer:?}"));
+        let mut object = object::create_object(&format!("{} {name} {layer:?}", self.name));
         object.begin(PaintType::Fill);
 
         for point in points {
@@ -3290,14 +3301,21 @@ mod tests {
 
     #[test]
     fn a_fresh_renderer_has_no_shapes() {
-        let renderer = TextRenderer::new();
+        let renderer = TextRenderer::new("text");
 
         assert_eq!(renderer.shape_count(), 0);
     }
 
     #[test]
+    fn the_name_is_remembered() {
+        let renderer = TextRenderer::new("title");
+
+        assert_eq!(renderer.name(), "title");
+    }
+
+    #[test]
     fn the_colour_and_depth_are_remembered() {
-        let mut renderer = TextRenderer::new();
+        let mut renderer = TextRenderer::new("text");
         renderer.color(1.0, 0.0, 0.0, 0.5).z(3.0);
 
         assert_eq!(renderer.color, [1.0, 0.0, 0.0, 0.5]);
