@@ -167,7 +167,7 @@ impl WindowFrame {
         title_bar_slice_line.camera_for(surface_size, design, self.scale_mode);
         title_bar_slice_line.instance(create_instance());
 
-        let mut text_title = TextRenderer::new();
+        let mut text_title = TextRenderer::new(&format!("{register_name_string}-text_title"));
         text_title.camera_for(surface_size, design, self.scale_mode);
         text_title.color(self.window_theme.text_title_color.r,self.window_theme.text_title_color.g,self.window_theme.text_title_color.b,self.window_theme.text_title_color.a);
 
