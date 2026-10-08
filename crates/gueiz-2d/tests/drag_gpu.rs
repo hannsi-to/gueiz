@@ -86,6 +86,11 @@ fn theme() -> WindowTheme {
 ///
 /// 字は書体がいる環境としない環境があるので、題名は空にして形だけ試す。
 fn scene(gpu: &Gpu) -> (DrawManager, WindowFrame) {
+    titled_scene(gpu, "")
+}
+
+/// 題名つきの窓。書体が読めなければ、題名の無い窓と同じになる。
+fn titled_scene(gpu: &Gpu, title: &str) -> (DrawManager, WindowFrame) {
     let mut draw_manager = DrawManager::new(
         &gpu.device,
         &gpu.queue,
@@ -96,7 +101,7 @@ fn scene(gpu: &Gpu) -> (DrawManager, WindowFrame) {
 
     let mut window_frame = WindowFrame::new(
         ScaleMode::Fixed,
-        String::new(),
+        title.to_string(),
         Quad {
             x: FRAME.0,
             y: FRAME.1,
@@ -624,4 +629,328 @@ fn dragging_after_resizing_from_the_top_left_keeps_the_grab() {
     frame.mouse_moved(&mut draw_manager, grab_x + 70.0, grab_y + 10.0);
 
     assert_eq!(frame.position(), [left + 70.0, top + 10.0]);
+}
+
+// ---- 大きさを変えたときの題名 ----
+
+/// 題名の字のインスタンスの数。字の形は `"<窓の名前>-text_title ..."` で登録される。
+fn title_instances(draw_manager: &DrawManager) -> usize {
+    draw_manager
+        .names()
+        .filter(|name| name.starts_with("Window-text_title "))
+        .filter_map(|name| draw_manager.object(name))
+        .map(|object| object.instances().len())
+        .sum()
+}
+
+/// **大きさを変えて題名を置き直しても、字が増えない。** 置き直す前に消している。
+#[test]
+fn resizing_lays_the_title_out_again_without_piling_it_up() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame) = titled_scene(gpu, "Title");
+
+    let before = title_instances(&draw_manager);
+
+    if before == 0 {
+        eprintln!("skipped: no font for the title");
+        return;
+    }
+
+    let (x, y) = on_the_bottom_right();
+    frame.mouse_left_pressed(&draw_manager, x, y);
+
+    for step in 1..=10 {
+        frame.mouse_moved(&mut draw_manager, x + step as f32 * 9.0, y + step as f32 * 4.0);
+    }
+
+    frame.mouse_left_released();
+    frame.set_size(&mut draw_manager, 200.0, 120.0);
+
+    assert_eq!(title_instances(&draw_manager), before, "題名の字が増えた");
+}
+
+/// 左上を動かす縁で広げても、**題名は帯の左上に付いてくる。**
+///
+/// 置き直しは組んだ左上を基準にし、ずれはずらしで持つ。ここが食い違うと、
+/// 題名だけ二重にずれる。
+#[test]
+fn the_title_follows_the_top_left_edge() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame) = titled_scene(gpu, "Title");
+
+    if title_instances(&draw_manager) == 0 {
+        eprintln!("skipped: no font for the title");
+        return;
+    }
+
+    let before = render(gpu, &mut draw_manager);
+
+    let (x, y) = (FRAME.0 - 2.0, FRAME.1 - 2.0);
+    assert!(frame.mouse_left_pressed(&draw_manager, x, y));
+    frame.mouse_moved(&mut draw_manager, x - 60.0, y - 40.0);
+    frame.mouse_left_released();
+
+    let after = render(gpu, &mut draw_manager);
+
+    // 題名のあたり（帯の左側）の白い字の画素を、ずらしたぶんだけ動かして比べる。
+    let bright = |pixels: &[u8], x: u32, y: u32| {
+        let at = ((y * SIZE + x) * 4) as usize;
+        pixels[at] > 200 && pixels[at + 1] > 200 && pixels[at + 2] > 200
+    };
+
+    let mut moved = 0;
+    let mut kept = 0;
+
+    for py in FRAME.1 as u32..(FRAME.1 + TITLE_BAR) as u32 {
+        for px in FRAME.0 as u32..(FRAME.0 + 60.0) as u32 {
+            if bright(&before, px, py) {
+                kept += 1;
+                if bright(&after, px - 60, py - 40) {
+                    moved += 1;
+                }
+            }
+        }
+    }
+
+    assert!(kept > 0, "題名が描かれていない");
+    assert_eq!(moved, kept, "題名が帯に付いてきていない");
+}
+
+// ---- 窓の中の部品 ----
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use gueiz_2d::gui::window_item::WindowItem;
+use gueiz_2d::instance::create_instance;
+use gueiz_2d::object::Object;
+use gueiz_2d::objects::rect::Rect;
+use gueiz_2d::paint_type::PaintType;
+use gueiz_2d::vertex::Vertex;
+
+/// 部品の高さ。
+const ITEM_HEIGHT: f32 = 20.0;
+
+/// 白い横長の四角を 1 つ持つだけの部品。窓に使える幅いっぱいに広がる。
+///
+/// 組むとき・組み直すときに渡された幅を、外から見られるように順に残す。
+struct Bar {
+    name: String,
+    width: f32,
+    object: Option<Object>,
+    widths: Rc<RefCell<Vec<f32>>>,
+}
+
+impl Bar {
+    fn new(name: &str, widths: Rc<RefCell<Vec<f32>>>) -> Self {
+        Self {
+            name: name.to_string(),
+            width: 0.0,
+            object: None,
+            widths,
+        }
+    }
+
+    fn shape(&self, x: f32, y: f32) -> Object {
+        let white = |x: f32, y: f32| Vertex::new_position_color(x, y, 0.0, 1.0, 1.0, 1.0, 1.0);
+
+        Rect::new(&self.name)
+            .paint_type(PaintType::Fill)
+            .from(white(x, y))
+            .to_wh(white(self.width, ITEM_HEIGHT))
+            .end()
+    }
+}
+
+impl WindowItem for Bar {
+    fn create_object(&mut self, item_x: f32, item_y: f32, width: f32, surface_size: SurfaceSize, design: [f32; 2]) -> (f32, f32) {
+        self.width = width;
+        self.widths.borrow_mut().push(width);
+
+        let mut object = self.shape(item_x, item_y);
+        object.camera_for(surface_size, design, ScaleMode::Fixed);
+        object.instance(create_instance());
+
+        self.object = Some(object);
+
+        (self.width, ITEM_HEIGHT)
+    }
+
+    fn register_draw_manager(&mut self, draw_manager: &mut DrawManager) {
+        if let Some(object) = self.object.take() {
+            draw_manager.register(object);
+        }
+    }
+
+    fn rebuild(&mut self, draw_manager: &mut DrawManager, item_x: f32, item_y: f32, width: f32) -> (f32, f32) {
+        self.width = width;
+        self.widths.borrow_mut().push(width);
+
+        let built = self.shape(item_x, item_y);
+
+        if let Some(object) = draw_manager.object_mut(&self.name) {
+            object.begin(built.paint_type());
+            for vertex in built.vertices() {
+                object.put_vertex(*vertex);
+            }
+            object.end();
+        }
+
+        (self.width, ITEM_HEIGHT)
+    }
+
+    fn object_names(&self) -> Vec<String> {
+        vec![self.name.clone()]
+    }
+}
+
+/// 部品を 2 つ積んだ窓と、組むとき・組み直すときに渡された幅の記録。
+fn scene_with_items(gpu: &Gpu) -> (DrawManager, WindowFrame, Rc<RefCell<Vec<f32>>>) {
+    let mut draw_manager = DrawManager::new(
+        &gpu.device,
+        &gpu.queue,
+        FORMAT,
+        &DrawManagerDescriptor::default(),
+    )
+    .expect("DrawManager を作れなかった");
+
+    let mut window_frame = WindowFrame::new(
+        ScaleMode::Fixed,
+        String::new(),
+        Quad {
+            x: FRAME.0,
+            y: FRAME.1,
+            width: FRAME.2,
+            height: FRAME.3,
+        },
+        TITLE_BAR,
+        // 余白なし。部品が窓の縁まで届くので、縁の取っ手と重なる。
+        Gap { x: 0.0, y: 0.0 },
+        theme(),
+    );
+
+    let widths = Rc::new(RefCell::new(Vec::new()));
+
+    window_frame.add_window_item(Box::new(Bar::new("Bar1", widths.clone())));
+    window_frame.add_window_item(Box::new(Bar::new("Bar2", widths.clone())));
+
+    let surface = SurfaceSize::new(SIZE, SIZE);
+
+    window_frame.create_object("Window", surface, [SIZE as f32, SIZE as f32]);
+    window_frame.register_draw_manager(&mut draw_manager);
+
+    draw_manager
+        .prepare(&gpu.device, &gpu.queue)
+        .expect("支度に失敗した");
+
+    (draw_manager, window_frame, widths)
+}
+
+/// そこが部品の白で塗られているか。窓の地（暗い灰色）とは分けて見る。
+fn white(pixels: &[u8], x: u32, y: u32) -> bool {
+    let at = ((y * SIZE + x) * 4) as usize;
+
+    pixels[at] > 200 && pixels[at + 1] > 200 && pixels[at + 2] > 200
+}
+
+/// 1 つ目の部品の真ん中あたり。帯のすぐ下。
+fn on_the_first_item() -> (u32, u32) {
+    ((FRAME.0 + 50.0) as u32, (FRAME.1 + TITLE_BAR + ITEM_HEIGHT / 2.0) as u32)
+}
+
+/// 部品は帯の下に、**前の部品の高さぶんずつ下へ**積まれる。
+/// 組むときから、窓に使える幅が渡される（この窓は余白なしなので窓の幅そのもの）。
+#[test]
+fn items_are_stacked_under_the_title_bar() {
+    let gpu = gpu!();
+    let (mut draw_manager, _frame, widths) = scene_with_items(gpu);
+
+    assert_eq!(*widths.borrow(), vec![FRAME.2; 2], "組むときの幅が違う");
+
+    let pixels = render(gpu, &mut draw_manager);
+    let (x, y) = on_the_first_item();
+
+    assert!(white(&pixels, x, y), "1 つ目の部品が無い");
+    assert!(white(&pixels, x, y + ITEM_HEIGHT as u32), "2 つ目の部品が無い");
+    assert!(!white(&pixels, x, y + ITEM_HEIGHT as u32 * 2), "部品が 3 つ目の場所まである");
+}
+
+/// **窓を動かすと、部品も付いてくる。** 部品の図形にもずらしが掛かる。
+#[test]
+fn items_move_with_the_window() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame, _) = scene_with_items(gpu);
+
+    let (bar_x, bar_y) = on_the_bar();
+    assert!(frame.mouse_left_pressed(&draw_manager, bar_x, bar_y));
+    frame.mouse_moved(&mut draw_manager, bar_x + 120.0, bar_y + 90.0);
+    frame.mouse_left_released();
+
+    let pixels = render(gpu, &mut draw_manager);
+    let (x, y) = on_the_first_item();
+
+    assert!(white(&pixels, x + 120, y + 90), "部品が付いてきていない");
+    assert!(!white(&pixels, x, y), "部品が元の場所に残っている");
+}
+
+/// **窓の大きさを変えると、部品が新しい幅で組み直される。** 図形は増えない。
+#[test]
+fn resizing_rebuilds_the_items_with_the_new_width() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame, widths) = scene_with_items(gpu);
+
+    let before = draw_manager.object_count();
+    widths.borrow_mut().clear();
+
+    // 元の右の縁より 40 右。広げる前は部品の外。
+    let (wide_x, (_, y)) = ((FRAME.0 + FRAME.2 + 40.0) as u32, on_the_first_item());
+    assert!(!white(&render(gpu, &mut draw_manager), wide_x, y), "広げる先に部品がある");
+
+    frame.set_size(&mut draw_manager, FRAME.2 + 80.0, FRAME.3);
+
+    // 2 つの部品が、新しい幅で組み直された。
+    assert_eq!(*widths.borrow(), vec![FRAME.2 + 80.0; 2]);
+    assert_eq!(draw_manager.object_count(), before, "図形が増えた");
+
+    assert!(white(&render(gpu, &mut draw_manager), wide_x, y), "部品が広がっていない");
+}
+
+/// 左上を動かす縁で大きさを変えても、**部品は帯の下に付いてくる。**
+///
+/// 部品は組んだ左上を基準に組み直し、ずれはずらしで持つ。ここが食い違うと、
+/// 部品だけ二重にずれる。
+#[test]
+fn items_follow_the_top_left_edge() {
+    let gpu = gpu!();
+    let (mut draw_manager, mut frame, _) = scene_with_items(gpu);
+
+    let (x, y) = (FRAME.0 - 2.0, FRAME.1 - 2.0);
+    assert!(frame.mouse_left_pressed(&draw_manager, x, y));
+    frame.mouse_moved(&mut draw_manager, x - 60.0, y - 40.0);
+    frame.mouse_left_released();
+
+    let pixels = render(gpu, &mut draw_manager);
+
+    // 新しい左上から見て、元と同じところに部品がある。
+    let (item_x, item_y) = on_the_first_item();
+    assert!(white(&pixels, item_x - 60, item_y - 40), "部品が帯の下に無い");
+}
+
+/// 部品の図形も窓のものとして扱う。部品の上の縁でも大きさを変えられる。
+///
+/// 当たり判定は、手前にあるものが自分の図形かを見る。部品の図形を
+/// 知らないと、部品の上の縁は別の窓のものとみなされる。
+#[test]
+fn the_edge_over_an_item_is_still_a_handle() {
+    let gpu = gpu!();
+    let (draw_manager, frame, _) = scene_with_items(gpu);
+
+    // 右の縁のすぐ内側、1 つ目の部品の上。
+    let (_, y) = on_the_first_item();
+    let x = FRAME.0 + FRAME.2 - 1.0;
+
+    let pick = draw_manager.pick(x, y as f32).expect("何も当たらない");
+    assert_eq!(pick.name, "Bar1", "部品が手前に無い");
+
+    assert_eq!(frame.resize_handle_at(&draw_manager, x, y as f32), Some(ResizeHandle::Right));
 }

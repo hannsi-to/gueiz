@@ -10,6 +10,7 @@ use gueiz_gpu::renderer::SurfaceSize;
 use gueiz_gpu::vertex::Vertex;
 use crate::draw_manager::DrawManager;
 use crate::font::Font;
+use crate::gui::window_item::{CreateObjectArguments, WindowItem};
 use crate::instance::create_instance;
 use crate::object::Object;
 use crate::objects::lines::{CurveRepresentationType, Lines};
@@ -28,6 +29,8 @@ pub const MIN_WIDTH: f32 = 120.0;
 const HANDLE_OUTSIDE: f32 = 6.0;
 /// 縁の**内側**で、取っ手になる幅。広くすると、帯の端で掴みにくくなる。
 const HANDLE_INSIDE: f32 = 3.0;
+/// 題名の字の大きさ。
+const TITLE_SIZE: f32 = 13.0;
 
 pub struct WindowFrame {
     scale_mode: ScaleMode,
@@ -42,6 +45,8 @@ pub struct WindowFrame {
     frame_outline: Option<Object>,
     title_bar_slice_line: Option<Object>,
     text_title: Option<TextRenderer>,
+    /// 題名の書体。大きさを変えたときに題名を置き直すのに使う。読めなければ `None`。
+    title_font: Option<Font<'static>>,
     register_name: RegisterName,
     /// 頂点を組んだときの左上。**動かしても変わりません。**
     ///
@@ -55,6 +60,7 @@ pub struct WindowFrame {
     /// 縁を引いているあいだだけ。
     resize: Option<Resize>,
     hidden: bool,
+    window_items: Vec<Box<dyn WindowItem>>,
 }
 
 /// 掴んでいるあいだの覚え。
@@ -156,6 +162,7 @@ impl WindowFrame {
             frame_outline: None,
             title_bar_slice_line: None,
             text_title: None,
+            title_font: None,
             register_name: RegisterName {
                 frame: None,
                 title_bar: None,
@@ -167,7 +174,12 @@ impl WindowFrame {
             drag: None,
             resize: None,
             hidden: false,
+            window_items: Vec::new(),
         }
+    }
+
+    pub fn add_window_item(&mut self, window_item: Box<dyn WindowItem>) {
+        self.window_items.push(window_item);
     }
 
     pub fn create_object(&mut self, register_name: &str, surface_size: SurfaceSize, design: [f32; 2]) {
@@ -181,12 +193,14 @@ impl WindowFrame {
         self.register_name.frame_outline = Some(format!("{register_name_string}-frame_outline"));
         self.register_name.title_bar_slice_line = Some(format!("{register_name_string}-title_bar_slice_line"));
 
-        let [mut frame, mut title_bar, mut frame_outline, mut title_bar_slice_line] = self.build_shapes();
-
-        for object in [&mut frame, &mut title_bar, &mut frame_outline, &mut title_bar_slice_line] {
+        let mut objects = self.build_shapes();
+        for object in &mut objects {
             object.camera_for(surface_size, design, self.scale_mode);
             object.instance(create_instance());
         }
+        let [frame, title_bar, frame_outline, title_bar_slice_line]: [Object; 4] = objects
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("build_shapes は 4 つ組む"));
 
         let mut register_name_text_title = register_name_string.clone();
         register_name_text_title.push_str("-text_title");
@@ -194,20 +208,109 @@ impl WindowFrame {
         let mut text_title = TextRenderer::new(self.register_name.text_title.clone().unwrap().as_str());
         text_title.camera_for(surface_size, design, self.scale_mode);
         text_title.color(self.window_theme.text_title_color.r,self.window_theme.text_title_color.g,self.window_theme.text_title_color.b,self.window_theme.text_title_color.a);
-        text_title.text_layout_data(TextLayoutData {
-            text: self.title.clone(),
-            style: TextStyle::new(13.0),
-            text_location: TextLocation::Area {
-                area: TextArea::new(self.frame_quad.x + self.gap.x, self.frame_quad.y, self.frame_quad.width - (self.gap.x * 2.0), self.title_bar_height)
-                    .vertical(TextAlign::Center),
-            },
-        });
+        text_title.text_layout_data(self.title_layout_data());
 
         self.frame = Some(frame);
         self.title_bar = Some(title_bar);
         self.frame_outline = Some(frame_outline);
         self.title_bar_slice_line = Some(title_bar_slice_line);
         self.text_title = Some(text_title);
+
+        let [item_x, mut item_y] = self.item_origin();
+        let width = self.item_width();
+        let mut counter = 0;
+        for window_item in &mut self.window_items {
+            let item_size = window_item.create_object(
+                CreateObjectArguments {
+                    register_name: &register_name_string,
+                    counter,
+                    item_x,
+                    item_y,
+                    width,
+                    surface_size,
+                    scale_mode: self.scale_mode,
+                    design
+                }
+            );
+            item_y += item_size.1;
+            counter += 1;
+        }
+    }
+
+    // --- 部品 ---
+
+    /// 1 つ目の部品を置く左上。帯のすぐ下で、余白ぶん内側。
+    ///
+    /// 形と同じく、**組んだときの左上（`built_origin`）が基準**です。
+    /// 置き場所のずれは、部品の図形にも [`Object::translate`] で掛けます。
+    fn item_origin(&self) -> [f32; 2] {
+        let [x, y] = self.built_origin;
+
+        [x + self.gap.x, y + self.title_bar_height + self.gap.y]
+    }
+
+    /// 部品に使える幅。窓の幅から左右の余白を引いたもの。
+    fn item_width(&self) -> f32 {
+        self.frame_quad.width - self.gap.x * 2.0
+    }
+
+    /// いまの幅で部品を組み直す。上から順に、前の部品の高さぶん下へ積む。
+    fn rebuild_items(&mut self, draw_manager: &mut DrawManager) {
+        let [item_x, mut item_y] = self.item_origin();
+        let width = self.item_width();
+
+        for window_item in &mut self.window_items {
+            let item_size = window_item.rebuild(draw_manager, item_x, item_y, width);
+            item_y += item_size.1;
+        }
+    }
+
+    /// 窓の大きさが変わった。枠の形・題名・部品をすべて今の大きさで組み直す。
+    fn rebuild_all(&mut self, draw_manager: &mut DrawManager) {
+        self.rebuild_shapes(draw_manager);
+        self.relayout_title(draw_manager);
+        self.rebuild_items(draw_manager);
+
+        // 組み直しで新しく出てきた図形（字の形など）には、まだずらしが掛かっていない。
+        self.apply_offset(draw_manager);
+    }
+
+    /// 題名をどこにどう置くか。
+    ///
+    /// 形と同じく、**組んだときの左上（`built_origin`）を基準に、いまの幅で**置きます。
+    /// 置き場所のずれは字の形にも [`Object::translate`] で掛かるので、ここには入れません。
+    fn title_layout_data(&self) -> TextLayoutData {
+        let [x, y] = self.built_origin;
+
+        TextLayoutData {
+            text: self.title.clone(),
+            style: TextStyle::new(TITLE_SIZE),
+            text_location: TextLocation::Area {
+                area: TextArea::new(x + self.gap.x, y, self.frame_quad.width - (self.gap.x * 2.0), self.title_bar_height)
+                    .vertical(TextAlign::Center),
+            },
+        }
+    }
+
+    /// いまの幅で題名を置き直す。
+    ///
+    /// 置いた字を消してから書き直すので、字は増えません。字の形は残っているので、
+    /// 同じ題名なら形の作り直しも起きません。書体を読めていなければ何もしません。
+    ///
+    /// 新しく出てきた字の形にずらしを掛けるのは、呼ぶ側（[`WindowFrame::rebuild_all`]）です。
+    fn relayout_title(&mut self, draw_manager: &mut DrawManager) {
+        let layout_data = self.title_layout_data();
+
+        let (Some(text_title), Some(font)) = (self.text_title.as_mut(), self.title_font.as_ref()) else {
+            return;
+        };
+
+        text_title.clear(draw_manager);
+        text_title.text_layout_data(layout_data);
+
+        if let Err(error) = text_title.register_draw_manager(draw_manager, font) {
+            log::warn!("failed to lay out the title again: {error}");
+        }
     }
 
     /// 枠・帯・縁取り・区切り線の形を組む。
@@ -215,7 +318,7 @@ impl WindowFrame {
     /// **組んだときの左上（`built_origin`）に、いまの大きさで組みます。**
     /// 置き場所のずれは [`Object::translate`] で持つので、ここには入れません。
     /// 名前は [`WindowFrame::create_object`] で決めたものを使います。
-    fn build_shapes(&self) -> [Object; 4] {
+    fn build_shapes(&self) -> Vec<Object> {
         let [x, y] = self.built_origin;
         let width = self.frame_quad.width;
         let height = self.frame_quad.height;
@@ -255,7 +358,7 @@ impl WindowFrame {
             .last_point(vertex(x - self.gap.x + width, y + self.title_bar_height, &theme.title_bar_slice_line_color))
             .end();
 
-        [frame, title_bar, frame_outline, title_bar_slice_line]
+        vec![frame, title_bar, frame_outline, title_bar_slice_line]
     }
 
     /// いまの大きさで形を組み直し、**登録済みの図形の中に**入れ直す。
@@ -296,6 +399,16 @@ impl WindowFrame {
         if let Some(title_bar_slice_line) = self.title_bar_slice_line.take() {
             draw_manager.register(title_bar_slice_line);
         }
+
+        self.register_title(draw_manager);
+
+        for window_item in &mut self.window_items {
+            window_item.register_draw_manager(draw_manager);
+        }
+    }
+
+    /// 題名の字を登録する。書体が読めなければ、題名を出さずに続ける。
+    fn register_title(&mut self, draw_manager: &mut DrawManager) {
         // 題名が無ければ書体は読まない。書体の無い環境でも枠だけは出せる。
         if self.title.is_empty() {
             return;
@@ -319,6 +432,9 @@ impl WindowFrame {
             };
 
             text_title.register_draw_manager(draw_manager, &font).expect("Failed to register draw manager");
+
+            // 大きさを変えたときに置き直すので、持っておく。
+            self.title_font = Some(font);
         }
     }
 
@@ -351,6 +467,17 @@ impl WindowFrame {
                     object.camera_for(surface_size, design, self.scale_mode);
                 }
             }
+        }
+
+        // 部品の図形のカメラも貼り直す。部品の側では要らない。
+        for window_item in &mut self.window_items {
+            for name in window_item.object_names() {
+                if let Some(object) = draw_manager.object_mut(&name) {
+                    object.camera_for(surface_size, design, self.scale_mode);
+                }
+            }
+
+            window_item.resize(draw_manager, surface_size, design);
         }
     }
 
@@ -388,12 +515,12 @@ impl WindowFrame {
 
     /// 大きさを決める。左上は動きません。下限より小さくはなりません。
     ///
-    /// 題名の字は組み直しません。左寄せなので、幅が変わっても置き場所は同じです。
+    /// 題名と部品も新しい幅で置き直します。
     pub fn set_size(&mut self, draw_manager: &mut DrawManager, width: f32, height: f32) {
         self.frame_quad.width = width.max(MIN_WIDTH);
         self.frame_quad.height = height.max(self.min_height());
 
-        self.rebuild_shapes(draw_manager);
+        self.rebuild_all(draw_manager);
     }
 
     /// 縁を引いているか。
@@ -529,6 +656,10 @@ impl WindowFrame {
             names.extend(text_title.shape_ids().map(String::from));
         }
 
+        for window_item in &self.window_items {
+            names.extend(window_item.object_names());
+        }
+
         names
     }
 
@@ -581,21 +712,14 @@ impl WindowFrame {
             return true;
         }
 
-        // 帯の上か。**手前にあるものが自分のものか**も見る。
-        // 別の窓がかぶさっているなら、そちらが取るべき。
-        if !self.title_bar_quad().hover(world[0], world[1]) {
-            return false;
+        let picks = draw_manager.pick_all(x, y);
+        for pick in picks {
+            if Some(pick.name) == self.register_name.title_bar {
+                self.drag = Some(Drag {
+                    grab: [world[0] - self.frame_quad.x, world[1] - self.frame_quad.y],
+                });
+            }
         }
-
-        match draw_manager.pick(x, y) {
-            Some(pick) if self.owns(&pick.name) => {}
-            // 何かがかぶさっている、または当たっていない。
-            _ => return false,
-        }
-
-        self.drag = Some(Drag {
-            grab: [world[0] - self.frame_quad.x, world[1] - self.frame_quad.y],
-        });
 
         true
     }
@@ -666,10 +790,10 @@ impl WindowFrame {
         self.frame_quad = quad;
 
         if sized {
-            self.rebuild_shapes(draw_manager);
-        }
-        // 左や上の縁は左上も動く。形は組んだ左上で組み直すので、ずらしで合わせる。
-        if moved {
+            // ずらしの掛け直しも含む。
+            self.rebuild_all(draw_manager);
+        } else if moved {
+            // 左や上の縁は左上も動く。形は組んだ左上で組み直すので、ずらしで合わせる。
             self.apply_offset(draw_manager);
         }
 
