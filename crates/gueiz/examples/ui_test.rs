@@ -92,6 +92,9 @@ impl Application {
             return;
         };
 
+        // 指で動かしたぶんを、描く前に 1 回だけ組み直す。
+        scene.window_frame.update(&mut scene.draw_manager, &scene.resources);
+
         if let Err(error) = scene.draw_manager.prepare() {
             log::error!("failed to prepare the frame: {error}");
             return;
@@ -381,8 +384,7 @@ impl Scene {
             },
 
             WindowEvent::PointerMoved { position, .. } => self.window_frame.mouse_moved(
-                &mut self.draw_manager,
-                &self.resources,
+                &self.draw_manager,
                 position.x as f32,
                 position.y as f32,
             ),

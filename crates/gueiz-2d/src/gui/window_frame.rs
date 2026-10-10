@@ -9,7 +9,7 @@ use wgpu::wgc::impl_parent_device;
 use gueiz_gpu::camera::ScaleMode;
 use gueiz_gpu::renderer::SurfaceSize;
 use gueiz_gpu::vertex::Vertex;
-use crate::clip::ClipMaskKind;
+use crate::effect::Block;
 use crate::draw_manager::DrawManager;
 use crate::gui::window_item::{WindowItemArguments1, WindowItem, WindowItemArguments2};
 use crate::instance::create_instance;
@@ -20,12 +20,14 @@ use crate::objects::polygon_rounded::CornerType;
 use crate::objects::rect::Rect;
 use crate::objects::rect_rounded::RectRounded;
 use crate::paint_type::{JointType, PaintType};
-use crate::text::{TextAlign, TextArea, TextLayoutData, TextLocation, TextRenderer, TextStyle};
+use crate::text::{measure, TextAlign, TextArea, TextLayoutData, TextLocation, TextRenderer, TextStyle};
 
 const CORNER_RADIUS: f32 = 10.0;
 const LINE_WIDTH: f32 = 1.0;
 
-/// 縮められる幅の下限。
+/// 縮められる幅の下限。題名を測れなかったとき（書体が無い・題名が空）に使います。
+///
+/// 測れたときは [`WindowFrame::min_width`] が題名の幅から決めます。
 pub const MIN_WIDTH: f32 = 120.0;
 /// 縁の**外側**で、大きさを変える取っ手になる幅。
 const HANDLE_OUTSIDE: f32 = 6.0;
@@ -57,6 +59,30 @@ pub struct WindowFrame {
     resize: Option<Resize>,
     hidden: bool,
     window_items: Vec<Box<dyn WindowItem>>,
+    /// 部品の図形に最後に積んだ、窓の外を削る山。積み直すときに、これを探して差し替える。
+    ///
+    /// 枠は角丸の四角なので、覆いを焼かずに式（[`Block::ClipRect`] と
+    /// [`Block::ClipHalfPlane`]）で削ります。大きさや置き場所が変わっても、
+    /// 数を差し替えるだけで済みます。
+    applied_clip: Option<[Block; 2]>,
+    /// 指で動かした・大きさを変えたぶんのうち、まだ図形に移していないもの。
+    /// [`WindowFrame::update`] でまとめて移す。
+    pending: Pending,
+    /// 縮められる幅の下限。[`WindowFrame::create_object`] で題名を測って決める。
+    min_width: f32,
+}
+
+/// 図形に移し待ちの変更。
+///
+/// 指の動きは 1 フレームに何度も届くことがあります。届くたびに組み直すと、
+/// 描かれない途中の形まで組むことになるので、印だけ付けておいて
+/// [`WindowFrame::update`] で 1 回にまとめます。
+#[derive(Default, Clone, Copy)]
+struct Pending {
+    /// 大きさが変わった。形・題名・部品を組み直す（ずらしも含む）。
+    rebuild: bool,
+    /// 置き場所だけが変わった。ずらしを掛け直す。
+    offset: bool,
 }
 
 /// 掴んでいるあいだの覚え。
@@ -161,6 +187,9 @@ impl WindowFrame {
             resize: None,
             hidden: false,
             window_items: Vec::new(),
+            applied_clip: None,
+            pending: Pending::default(),
+            min_width: MIN_WIDTH,
         }
     }
 
@@ -169,6 +198,10 @@ impl WindowFrame {
     }
 
     pub fn create_object(&mut self, draw_manager: &mut DrawManager, resources: &Resources, register_name: &str, surface_size: SurfaceSize, design: [f32; 2]) {
+        // 題名が収まる幅より狭くはしない。形を組む前に決める。
+        self.min_width = self.measure_min_width(resources);
+        self.frame_quad.width = self.frame_quad.width.max(self.min_width);
+
         // ずらす量はここからの差で出す。
         self.built_origin = [self.frame_quad.x, self.frame_quad.y];
 
@@ -197,7 +230,6 @@ impl WindowFrame {
         text_title.text_layout_data(self.title_layout_data());
         self.text_title = Some(text_title);
 
-        let clip_mask = draw_manager.add_clip_mask(&frame, ClipMaskKind::Distance);
         draw_manager.register(frame);
         draw_manager.register(title_bar);
         draw_manager.register(frame_outline);
@@ -218,7 +250,6 @@ impl WindowFrame {
                     item_x,
                     item_y,
                     width,
-                    clip_mask,
                     surface_size,
                     scale_mode: self.scale_mode,
                     design
@@ -227,6 +258,9 @@ impl WindowFrame {
             item_y += item_size.1;
             counter += 1;
         }
+
+        // 部品の図形は、ここまでで全部登録されている。
+        self.apply_clip(draw_manager);
     }
 
     // --- 部品 ---
@@ -275,7 +309,7 @@ impl WindowFrame {
         self.relayout_title(draw_manager, resources);
         self.rebuild_items(draw_manager, resources, );
 
-        // 組み直しで新しく出てきた図形（字の形など）には、まだずらしが掛かっていない。
+        // 組み直しで新しく出てきた図形（字の形など）には、まだずらしも覆いも掛かっていない。
         self.apply_offset(draw_manager);
     }
 
@@ -448,6 +482,27 @@ impl WindowFrame {
         }
     }
 
+    // --- フレームごと ---
+
+    /// 指で動かした・大きさを変えたぶんを図形に移す。**描く前に 1 フレーム 1 回呼んでください。**
+    ///
+    /// [`WindowFrame::mouse_moved`] は窓の場所と大きさを覚えるだけで、図形には触りません。
+    /// 指の動きが 1 フレームに何度届いても、組み直しはここでの 1 回で済みます。
+    ///
+    /// 何か移したら `true`。
+    pub fn update(&mut self, draw_manager: &mut DrawManager, resources: &Resources) -> bool {
+        let pending = std::mem::take(&mut self.pending);
+
+        if pending.rebuild {
+            // ずらしの掛け直しも含む。
+            self.rebuild_all(draw_manager, resources);
+        } else if pending.offset {
+            self.apply_offset(draw_manager);
+        }
+
+        pending.rebuild || pending.offset
+    }
+
     // --- 動かす ---
 
     /// いまの左上。動かすとここが変わります。
@@ -460,6 +515,7 @@ impl WindowFrame {
         self.frame_quad.x = x;
         self.frame_quad.y = y;
 
+        self.pending.offset = false;
         self.apply_offset(draw_manager);
     }
 
@@ -475,6 +531,31 @@ impl WindowFrame {
         [self.frame_quad.width, self.frame_quad.height]
     }
 
+    /// 縮められる幅の下限。題名が左右の余白ごと収まる幅です。
+    ///
+    /// [`WindowFrame::create_object`] より前は [`MIN_WIDTH`] を返します。
+    pub fn min_width(&self) -> f32 {
+        self.min_width
+    }
+
+    /// 題名を測って、幅の下限を出す。測れなければ [`MIN_WIDTH`]。
+    ///
+    /// 斜体や影で送り幅より右まで塗られることがあるので、塗られる右端も見ます。
+    /// 丸い角が潰れないよう、角 2 つぶんより狭くはしません。
+    fn measure_min_width(&self, resources: &Resources) -> f32 {
+        if self.title.is_empty() {
+            return MIN_WIDTH;
+        }
+        let Some(font) = resources.font(self.window_font.base_font) else {
+            return MIN_WIDTH;
+        };
+
+        let size = measure(&font, &self.title, &TextStyle::new(TITLE_SIZE));
+        let title_width = size.width.max(size.ink.right);
+
+        (title_width + self.gap.x * 2.0).max(CORNER_RADIUS * 2.0)
+    }
+
     /// 縮められる高さの下限。帯と、下の丸い角が収まるぶん。
     pub fn min_height(&self) -> f32 {
         self.title_bar_height + CORNER_RADIUS * 2.0
@@ -484,9 +565,11 @@ impl WindowFrame {
     ///
     /// 題名と部品も新しい幅で置き直します。
     pub fn set_size(&mut self, draw_manager: &mut DrawManager, resources: &Resources, width: f32, height: f32) {
-        self.frame_quad.width = width.max(MIN_WIDTH);
+        self.frame_quad.width = width.max(self.min_width);
         self.frame_quad.height = height.max(self.min_height());
 
+        // 組み直しはずらしも含むので、待っていたぶんはここで済む。
+        self.pending = Pending::default();
         self.rebuild_all(draw_manager, resources);
     }
 
@@ -547,6 +630,7 @@ impl WindowFrame {
     fn resized_quad(&self, resize: &Resize, delta: [f32; 2]) -> Quad {
         let start = &resize.start_quad;
         let handle = resize.handle;
+        let min_width = self.min_width;
         let min_height = self.min_height();
 
         let mut quad = Quad {
@@ -559,11 +643,11 @@ impl WindowFrame {
         // 左と上は、**向かいの縁を止めたまま**動かす。
         if handle.moves_left() {
             let right = start.x + start.width;
-            quad.x = (start.x + delta[0]).min(right - MIN_WIDTH);
+            quad.x = (start.x + delta[0]).min(right - min_width);
             quad.width = right - quad.x;
         }
         if handle.moves_right() {
-            quad.width = (start.width + delta[0]).max(MIN_WIDTH);
+            quad.width = (start.width + delta[0]).max(min_width);
         }
         if handle.moves_top() {
             let bottom = start.y + start.height;
@@ -592,7 +676,7 @@ impl WindowFrame {
     /// 頂点は組んだ場所に置いたままで、**親の変換だけ**をずらします。
     /// [`Object::translate`] は複製より手前に掛かるので、字のように
     /// 複製をたくさん持つ図形も、1 回で丸ごと動きます。
-    fn apply_offset(&self, draw_manager: &mut DrawManager) {
+    fn apply_offset(&mut self, draw_manager: &mut DrawManager) {
         let x = self.frame_quad.x - self.built_origin[0];
         let y = self.frame_quad.y - self.built_origin[1];
 
@@ -601,6 +685,58 @@ impl WindowFrame {
                 object.translate(x, y, 0.0);
             }
         }
+
+        // 削る範囲はワールドで持つので、枠と一緒には動かない。いまの場所で積み直す。
+        self.apply_clip(draw_manager);
+    }
+
+    /// 窓の外を削る山。いまの置き場所と大きさで組む。
+    ///
+    /// 削るのは枠（題名の帯より下）の外です。角丸の四角で窓全体の外を削り、
+    /// 半平面で帯から上を削ります。
+    fn clip_blocks(&self) -> [Block; 2] {
+        let Quad { x, y, width, height } = self.frame_quad;
+        let top = y + self.title_bar_height;
+
+        [
+            Block::ClipRect {
+                min: [x, y],
+                max: [x + width, y + height],
+                radius: CORNER_RADIUS,
+                softness: 0.0,
+                invert: false,
+            },
+            // `normal` の向く先（帯の側）が削られる。
+            Block::ClipHalfPlane {
+                normal: [0.0, -1.0],
+                distance: -top,
+                softness: 0.0,
+                invert: false,
+            },
+        ]
+    }
+
+    /// 部品の図形に、窓の外を削る山を積む。何度呼んでも 1 組にしかなりません。
+    ///
+    /// 前に積んだ山があれば差し替え、無ければ（新しく出てきた字の形など）積みます。
+    fn apply_clip(&mut self, draw_manager: &mut DrawManager) {
+        let blocks = self.clip_blocks();
+        let applied = self.applied_clip;
+
+        for window_item in &self.window_items {
+            for name in window_item.object_names() {
+                let Some(object) = draw_manager.object_mut(&name) else {
+                    continue;
+                };
+
+                for (index, block) in blocks.into_iter().enumerate() {
+                    let old = applied.map(|applied| applied[index]);
+                    object.replace_effect(|effect| Some(*effect) == old, block);
+                }
+            }
+        }
+
+        self.applied_clip = Some(blocks);
     }
 
     /// この窓が持っている図形の名前。字の形も入ります。
@@ -712,9 +848,12 @@ impl WindowFrame {
     ///
     /// **枠の外へ出ても離しません。** 放すまでは動かし続けます。
     /// 離すと、少し外れた瞬間に窓が置き去りになります。
-    pub fn mouse_moved(&mut self, draw_manager: &mut DrawManager, resources: &Resources, x: f32, y: f32) -> bool {
+    ///
+    /// 窓の場所と大きさを覚えるだけで、図形はまだ動きません。
+    /// [`WindowFrame::update`] で移してください。
+    pub fn mouse_moved(&mut self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
         if self.resize.is_some() {
-            return self.resize_moved(draw_manager, resources, x, y);
+            return self.resize_moved(draw_manager, x, y);
         }
 
         let Some(drag) = self.drag.as_ref() else {
@@ -732,7 +871,7 @@ impl WindowFrame {
         self.frame_quad.x = world[0] - grab[0];
         self.frame_quad.y = world[1] - grab[1];
 
-        self.apply_offset(draw_manager);
+        self.pending.offset = true;
 
         true
     }
@@ -740,7 +879,7 @@ impl WindowFrame {
     /// 縁を引いている指が動いた。[`WindowFrame::mouse_moved`] からだけ呼ぶ。
     ///
     /// 動かすときと同じく、枠の外へ出ても放すまでは付いてきます。
-    fn resize_moved(&mut self, draw_manager: &mut DrawManager, resources: &Resources, x: f32, y: f32) -> bool {
+    fn resize_moved(&mut self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
         let Some(world) = self.to_world(draw_manager, x, y) else {
             return false;
         };
@@ -757,11 +896,10 @@ impl WindowFrame {
         self.frame_quad = quad;
 
         if sized {
-            // ずらしの掛け直しも含む。
-            self.rebuild_all(draw_manager, resources);
+            self.pending.rebuild = true;
         } else if moved {
             // 左や上の縁は左上も動く。形は組んだ左上で組み直すので、ずらしで合わせる。
-            self.apply_offset(draw_manager);
+            self.pending.offset = true;
         }
 
         true

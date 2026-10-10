@@ -630,6 +630,28 @@ impl Object {
         self
     }
 
+    /// `matches` に当たる山を `block` に差し替える。無ければ積む。
+    ///
+    /// 同じ山を何度も積み直すとき（動かすたびに覆いをずらす、など）に。
+    /// [`Object::edit_effects`] と違い、形の段でなければ三角形を作り直しません。
+    pub fn replace_effect(&mut self, matches: impl Fn(&Block) -> bool, block: Block) -> &mut Self {
+        let stage = block.stage();
+        let index = self.effects.blocks(stage).iter().position(matches);
+
+        if let Some(index) = index {
+            self.effects.remove(stage, index);
+            self.effects.push(block);
+            let last = self.effects.blocks(stage).len() - 1;
+            // 効く順を変えないように、元の場所へ戻す。
+            self.effects.move_block(stage, last, index);
+        } else {
+            self.effects.push(block);
+        }
+
+        self.after_effects_changed(stage);
+        self
+    }
+
     /// エフェクトを書き換える。閉じたときに必要なぶんだけ作り直す。
     ///
     /// 順番の入れ替え（[`EffectStack::move_block`]）や削除はここから。

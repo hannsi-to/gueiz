@@ -118,12 +118,10 @@ impl WindowItem for Label {
             width: window_item_arguments.width,
             scale_mode: window_item_arguments.scale_mode,
         }));
-        for name in text_label.shape_ids() {
-            if let Some(object) = window_item_arguments.draw_manager.object_mut(name) {
-                object.effect(window_item_arguments.clip_mask.block());
-            }
-        }
-        
+
+        // 窓の外を削る覆いは、窓が object_names() の図形すべてに積みます。
+        // 字の形はこの下の register_draw_manager で初めて登録されるので、
+        // ここで shape_ids() を回しても何もありません。
         let Some(font) = window_item_arguments.resources.font(self.label_font.base_font) else {
             log::warn!("the title font is not in the resources; the title is not drawn");
             return (0.0, 0.0);
