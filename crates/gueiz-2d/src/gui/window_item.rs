@@ -1,8 +1,11 @@
 use gueiz_gpu::camera::ScaleMode;
 use gueiz_gpu::renderer::SurfaceSize;
 use crate::draw_manager::DrawManager;
+use crate::resource::Resources;
 
-pub struct CreateObjectArguments<'a> {
+pub struct WindowItemArguments1<'a> {
+    pub draw_manager: &'a mut DrawManager,
+    pub resources: &'a Resources,
     pub register_name: &'a String,
     pub counter: i32,
     pub item_x: f32,
@@ -11,6 +14,18 @@ pub struct CreateObjectArguments<'a> {
     pub surface_size: SurfaceSize,
     pub scale_mode: ScaleMode,
     pub design: [f32; 2],
+}
+
+
+pub struct WindowItemArguments2<'a> {
+    pub draw_manager: &'a mut DrawManager,
+    pub resources: &'a Resources,
+    pub register_name: &'a String,
+    pub counter: i32,
+    pub item_x: f32,
+    pub item_y: f32,
+    pub width: f32,
+    pub scale_mode: ScaleMode,
 }
 
 /// 窓の中に置く部品。
@@ -37,9 +52,7 @@ pub trait WindowItem {
     ///
     /// `width` は部品に使える幅（窓の幅から左右の余白を引いたもの）です。
     /// [`WindowItem::rebuild`] に渡す幅と同じ決め方なので、寄せや折り返しを最初から合わせられます。
-    fn create_object(&mut self, create_object_arguments: CreateObjectArguments) -> (f32, f32);
-
-    fn register_draw_manager(&mut self, draw_manager: &mut DrawManager);
+    fn create_object(&mut self, window_item_arguments: WindowItemArguments1) -> (f32, f32);
 
     /// 窓の大きさが変わった。**登録済みの図形の中で**組み直す。返すのは新しい `(幅, 高さ)`。
     ///
@@ -50,7 +63,7 @@ pub trait WindowItem {
     /// [`Object::begin`](crate::object::Object::begin) から
     /// [`Object::end`](crate::object::Object::end) で、
     /// 字なら [`TextRenderer::clear`](crate::text::TextRenderer::clear) してから書き直します。
-    fn rebuild(&mut self, draw_manager: &mut DrawManager, item_x: f32, item_y: f32, width: f32) -> (f32, f32);
+    fn rebuild(&mut self, window_item_arguments: WindowItemArguments2) -> (f32, f32);
 
     /// この部品が登録した図形の名前。字の形
     /// （[`TextRenderer::shape_ids`](crate::text::TextRenderer::shape_ids)）も入れてください。

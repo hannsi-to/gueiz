@@ -9,10 +9,10 @@ use gueiz_gpu::camera::ScaleMode;
 use gueiz_gpu::renderer::SurfaceSize;
 use gueiz_gpu::vertex::Vertex;
 use crate::draw_manager::DrawManager;
-use crate::font::Font;
-use crate::gui::window_item::{CreateObjectArguments, WindowItem};
+use crate::gui::window_item::{WindowItemArguments1, WindowItem, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
+use crate::resource::{FontHandle, Resources};
 use crate::objects::lines::{CurveRepresentationType, Lines};
 use crate::objects::polygon_rounded::CornerType;
 use crate::objects::rect::Rect;
@@ -40,13 +40,7 @@ pub struct WindowFrame {
     gap: Gap,
     window_font: WindowFont,
     window_theme: WindowTheme,
-    frame: Option<Object>,
-    title_bar: Option<Object>,
-    frame_outline: Option<Object>,
-    title_bar_slice_line: Option<Object>,
     text_title: Option<TextRenderer>,
-    /// 題名の書体。大きさを変えたときに題名を置き直すのに使う。読めなければ `None`。
-    title_font: Option<Font<'static>>,
     register_name: RegisterName,
     /// 頂点を組んだときの左上。**動かしても変わりません。**
     ///
@@ -131,7 +125,8 @@ pub struct WindowTheme {
 }
 
 pub struct WindowFont {
-    pub base_font_path: String,
+    /// 題名に使う書体。中身は呼ぶ側の [`Resources`] が持つ。
+    pub base_font: FontHandle,
 }
 
 pub struct ThemeColor {
@@ -142,27 +137,16 @@ pub struct ThemeColor {
 }
 
 impl WindowFrame {
-    pub fn new(scale_mode: ScaleMode,title: String, frame_quad: Quad, title_bar_height: f32, gap: Gap, window_theme: WindowTheme) -> Self {
+    pub fn new(scale_mode: ScaleMode,title: String, frame_quad: Quad, title_bar_height: f32, gap: Gap, window_font: WindowFont, window_theme: WindowTheme) -> Self {
         Self {
             scale_mode,
             title,
             frame_quad,
             title_bar_height,
             gap,
-            window_font: WindowFont {
-                base_font_path: if cfg!(target_os = "windows") {
-                    "C:/Windows/Fonts/YuGothM.ttc".to_string()
-                } else {
-                    "/System/Library/Fonts/Avenir Next.ttc".to_string()
-                },
-            },
+            window_font,
             window_theme,
-            frame: None,
-            title_bar: None,
-            frame_outline: None,
-            title_bar_slice_line: None,
             text_title: None,
-            title_font: None,
             register_name: RegisterName {
                 frame: None,
                 title_bar: None,
@@ -182,7 +166,7 @@ impl WindowFrame {
         self.window_items.push(window_item);
     }
 
-    pub fn create_object(&mut self, register_name: &str, surface_size: SurfaceSize, design: [f32; 2]) {
+    pub fn create_object(&mut self, draw_manager: &mut DrawManager, resources: &Resources, register_name: &str, surface_size: SurfaceSize, design: [f32; 2]) {
         // ずらす量はここからの差で出す。
         self.built_origin = [self.frame_quad.x, self.frame_quad.y];
 
@@ -210,18 +194,21 @@ impl WindowFrame {
         text_title.color(self.window_theme.text_title_color.r,self.window_theme.text_title_color.g,self.window_theme.text_title_color.b,self.window_theme.text_title_color.a);
         text_title.text_layout_data(self.title_layout_data());
 
-        self.frame = Some(frame);
-        self.title_bar = Some(title_bar);
-        self.frame_outline = Some(frame_outline);
-        self.title_bar_slice_line = Some(title_bar_slice_line);
-        self.text_title = Some(text_title);
+        draw_manager.register(frame);
+        draw_manager.register(title_bar);
+        draw_manager.register(frame_outline);
+        draw_manager.register(title_bar_slice_line);
+
+        self.register_title(draw_manager, resources);
 
         let [item_x, mut item_y] = self.item_origin();
         let width = self.item_width();
         let mut counter = 0;
         for window_item in &mut self.window_items {
             let item_size = window_item.create_object(
-                CreateObjectArguments {
+                WindowItemArguments1 {
+                    draw_manager,
+                    resources: &resources,
                     register_name: &register_name_string,
                     counter,
                     item_x,
@@ -255,21 +242,33 @@ impl WindowFrame {
     }
 
     /// いまの幅で部品を組み直す。上から順に、前の部品の高さぶん下へ積む。
-    fn rebuild_items(&mut self, draw_manager: &mut DrawManager) {
+    fn rebuild_items(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
         let [item_x, mut item_y] = self.item_origin();
         let width = self.item_width();
-
+        let mut counter = 0;
         for window_item in &mut self.window_items {
-            let item_size = window_item.rebuild(draw_manager, item_x, item_y, width);
+            let item_size = window_item.rebuild(
+                WindowItemArguments2 {
+                    draw_manager,
+                    resources: &resources,
+                    register_name: &self.register_name.frame.as_ref().unwrap(),
+                    counter,
+                    item_x,
+                    item_y,
+                    width,
+                    scale_mode: self.scale_mode,
+                }
+            );
             item_y += item_size.1;
+            counter += 1;
         }
     }
 
     /// 窓の大きさが変わった。枠の形・題名・部品をすべて今の大きさで組み直す。
-    fn rebuild_all(&mut self, draw_manager: &mut DrawManager) {
+    fn rebuild_all(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
         self.rebuild_shapes(draw_manager);
-        self.relayout_title(draw_manager);
-        self.rebuild_items(draw_manager);
+        self.relayout_title(draw_manager, resources);
+        self.rebuild_items(draw_manager, resources, );
 
         // 組み直しで新しく出てきた図形（字の形など）には、まだずらしが掛かっていない。
         self.apply_offset(draw_manager);
@@ -298,17 +297,17 @@ impl WindowFrame {
     /// 同じ題名なら形の作り直しも起きません。書体を読めていなければ何もしません。
     ///
     /// 新しく出てきた字の形にずらしを掛けるのは、呼ぶ側（[`WindowFrame::rebuild_all`]）です。
-    fn relayout_title(&mut self, draw_manager: &mut DrawManager) {
+    fn relayout_title(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
         let layout_data = self.title_layout_data();
 
-        let (Some(text_title), Some(font)) = (self.text_title.as_mut(), self.title_font.as_ref()) else {
+        let (Some(text_title), Some(font)) = (self.text_title.as_mut(), resources.font(self.window_font.base_font)) else {
             return;
         };
 
         text_title.clear(draw_manager);
         text_title.text_layout_data(layout_data);
 
-        if let Err(error) = text_title.register_draw_manager(draw_manager, font) {
+        if let Err(error) = text_title.register_draw_manager(draw_manager, &font) {
             log::warn!("failed to lay out the title again: {error}");
         }
     }
@@ -386,55 +385,18 @@ impl WindowFrame {
         }
     }
 
-    pub fn register_draw_manager(&mut self, draw_manager: &mut DrawManager) {
-        if let Some(frame) = self.frame.take() {
-            draw_manager.register(frame);
-        }
-        if let Some(title_bar) = self.title_bar.take() {
-            draw_manager.register(title_bar);
-        }
-        if let Some(frame_outline) = self.frame_outline.take() {
-            draw_manager.register(frame_outline);
-        }
-        if let Some(title_bar_slice_line) = self.title_bar_slice_line.take() {
-            draw_manager.register(title_bar_slice_line);
-        }
-
-        self.register_title(draw_manager);
-
-        for window_item in &mut self.window_items {
-            window_item.register_draw_manager(draw_manager);
-        }
-    }
-
     /// 題名の字を登録する。書体が読めなければ、題名を出さずに続ける。
-    fn register_title(&mut self, draw_manager: &mut DrawManager) {
+    fn register_title(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
         // 題名が無ければ書体は読まない。書体の無い環境でも枠だけは出せる。
         if self.title.is_empty() {
             return;
         }
+        let Some(font) = resources.font(self.window_font.base_font) else {
+            log::warn!("the title font is not in the resources; the title is not drawn");
+            return;
+        };
         if let Some(text_title) = self.text_title.as_mut() {
-            let path = &self.window_font.base_font_path;
-
-            let data = match std::fs::read(path) {
-                Ok(data) => data,
-                Err(error) => {
-                    log::warn!("failed to read the font '{path}': {error}; the title is not drawn");
-                    return;
-                }
-            };
-            let font = match Font::from_bytes(data.leak()) {
-                Ok(font) => font,
-                Err(error) => {
-                    log::warn!("failed to load the font '{path}': {error}; the title is not drawn");
-                    return;
-                }
-            };
-
             text_title.register_draw_manager(draw_manager, &font).expect("Failed to register draw manager");
-
-            // 大きさを変えたときに置き直すので、持っておく。
-            self.title_font = Some(font);
         }
     }
 
@@ -516,11 +478,11 @@ impl WindowFrame {
     /// 大きさを決める。左上は動きません。下限より小さくはなりません。
     ///
     /// 題名と部品も新しい幅で置き直します。
-    pub fn set_size(&mut self, draw_manager: &mut DrawManager, width: f32, height: f32) {
+    pub fn set_size(&mut self, draw_manager: &mut DrawManager, resources: &Resources, width: f32, height: f32) {
         self.frame_quad.width = width.max(MIN_WIDTH);
         self.frame_quad.height = height.max(self.min_height());
 
-        self.rebuild_all(draw_manager);
+        self.rebuild_all(draw_manager, resources);
     }
 
     /// 縁を引いているか。
@@ -745,9 +707,9 @@ impl WindowFrame {
     ///
     /// **枠の外へ出ても離しません。** 放すまでは動かし続けます。
     /// 離すと、少し外れた瞬間に窓が置き去りになります。
-    pub fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+    pub fn mouse_moved(&mut self, draw_manager: &mut DrawManager, resources: &Resources, x: f32, y: f32) -> bool {
         if self.resize.is_some() {
-            return self.resize_moved(draw_manager, x, y);
+            return self.resize_moved(draw_manager, resources, x, y);
         }
 
         let Some(drag) = self.drag.as_ref() else {
@@ -773,7 +735,7 @@ impl WindowFrame {
     /// 縁を引いている指が動いた。[`WindowFrame::mouse_moved`] からだけ呼ぶ。
     ///
     /// 動かすときと同じく、枠の外へ出ても放すまでは付いてきます。
-    fn resize_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+    fn resize_moved(&mut self, draw_manager: &mut DrawManager, resources: &Resources, x: f32, y: f32) -> bool {
         let Some(world) = self.to_world(draw_manager, x, y) else {
             return false;
         };
@@ -791,7 +753,7 @@ impl WindowFrame {
 
         if sized {
             // ずらしの掛け直しも含む。
-            self.rebuild_all(draw_manager);
+            self.rebuild_all(draw_manager, resources);
         } else if moved {
             // 左や上の縁は左上も動く。形は組んだ左上で組み直すので、ずらしで合わせる。
             self.apply_offset(draw_manager);

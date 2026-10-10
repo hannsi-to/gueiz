@@ -13,9 +13,11 @@ use gueiz::gpu::camera::ScaleMode;
 use gueiz::gpu::msaa::DEFAULT_MULTISAMPLE;
 use gueiz::gpu::renderer::{Renderer, RendererBackend, SurfaceSize};
 use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
-use gueiz_2d::gui::window_frame::{DeviceId, Gap, Quad, ResizeHandle, ThemeColor, WindowFrame, WindowTheme};
+use gueiz_2d::gui::label::{Label, LabelFont, LabelRegisterName, LabelTheme};
+use gueiz_2d::gui::window_frame::{DeviceId, Gap, Quad, ResizeHandle, ThemeColor, WindowFont, WindowFrame, WindowTheme};
 use gueiz_2d::instance::create_instance;
 use gueiz_2d::object::Object;
+use gueiz_2d::resource::Resources;
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -185,6 +187,10 @@ impl ApplicationHandler for Application {
 
             WindowEvent::RedrawRequested => self.draw_frame(),
 
+            // macOS では最初の描画が窓の出る前に来て、`Occluded` で飛ばされる。
+            // 常時回していないので、見えるようになったら描き直しを頼む。
+            WindowEvent::Occluded(false) => self.request_redraw(),
+
             _ => {}
         }
 
@@ -213,6 +219,8 @@ impl ApplicationHandler for Application {
 
 struct Scene {
     draw_manager: DrawManager,
+    /// 窓が使う書体などを預かる。窓は取っ手だけを持つ。
+    resources: Resources,
     window_frame: WindowFrame,
     scale_factor: f32,
 }
@@ -238,6 +246,15 @@ impl Scene {
 
         let mut draw_manager = DrawManager::new(device, queue, format, &descriptor)?;
 
+        let font_path = if cfg!(target_os = "windows") {
+            "C:/Windows/Fonts/YuGothM.ttc".to_string()
+        } else {
+            "/System/Library/Fonts/Avenir Next.ttc".to_string()
+        };
+
+        let mut resources = Resources::new();
+        let font_handle = resources.load_font_file("font", font_path)?;
+
         let mut window_frame = WindowFrame::new(
             ScaleMode::Stretch,
             "TestWindow1".to_string(),
@@ -251,6 +268,9 @@ impl Scene {
             Gap {
                 x: 5.0,
                 y: 0.0,
+            },
+            WindowFont {
+                base_font: font_handle,
             },
             WindowTheme {
                 frame_fill_color: ThemeColor {
@@ -285,15 +305,40 @@ impl Scene {
                 }
             }
         );
+        // window_frame.add_window_item(
+        //     Box::new(
+        //         Label::new(
+        //             "TestLabel1".to_string(),
+        //             32.0,
+        //             Gap {
+        //                 x: 0.0,
+        //                 y: 0.0,
+        //             },
+        //             LabelFont {
+        //                 base_font: font_handle,
+        //             },
+        //             LabelTheme {
+        //                 label_color: ThemeColor {
+        //                     r: 0.0,
+        //                     g: 0.0,
+        //                     b: 0.0,
+        //                     a: 1.0,
+        //                 },
+        //             }
+        //         )
+        //     )
+        // );
         window_frame.create_object(
+            &mut draw_manager,
+            &resources,
             "TestWindowObject",
             surface_size,
             surface_size.to_logical(scale_factor),
         );
-        window_frame.register_draw_manager(&mut draw_manager);
 
         Ok(Self {
             draw_manager,
+            resources,
             window_frame,
             scale_factor,
         })
@@ -341,6 +386,7 @@ impl Scene {
 
             WindowEvent::PointerMoved { position, .. } => self.window_frame.mouse_moved(
                 &mut self.draw_manager,
+                &self.resources,
                 position.x as f32,
                 position.y as f32,
             ),
