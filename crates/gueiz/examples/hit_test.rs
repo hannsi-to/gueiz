@@ -279,7 +279,7 @@ fn render(
         DrawManager::new(device, queue, FORMAT, &DrawManagerDescriptor::default())?;
 
     draw_manager.register(object);
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("hit test"),

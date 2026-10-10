@@ -109,7 +109,7 @@ fn square(name: &str, x: f32, y: f32, size: f32, color: [f32; 3]) -> Object {
 /// 描いて画素を読み戻す。
 fn render(gpu: &Gpu, manager: &mut DrawManager) -> Vec<u8> {
     manager
-        .prepare(&gpu.device, &gpu.queue)
+        .prepare()
         .expect("支度に失敗した");
 
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {

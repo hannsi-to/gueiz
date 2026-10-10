@@ -187,7 +187,7 @@ impl Harness {
         square.instance(instance::create_instance());
 
         draw_manager.register(square);
-        draw_manager.prepare(device, queue)?;
+        draw_manager.prepare()?;
 
         let destination = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("destination"),

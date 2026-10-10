@@ -197,7 +197,7 @@ fn render(
     light: Light,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut draw_manager =
-        DrawManager3d::new(device, FORMAT, &DrawManager3dDescriptor::default())?;
+        DrawManager3d::new(device, queue, FORMAT, &DrawManager3dDescriptor::default())?;
 
     draw_manager.set_camera(camera());
     light.apply(&mut draw_manager);
@@ -209,14 +209,13 @@ fn render(
         draw_manager.register(object);
     }
 
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("mesh3d test"),
     });
 
     draw_manager.draw(
-        device,
         &mut encoder,
         &target.view,
         SIZE,
@@ -268,7 +267,7 @@ fn culling_counts(
     culling: bool,
 ) -> Result<(u32, u32), Box<dyn Error>> {
     let mut draw_manager =
-        DrawManager3d::new(device, FORMAT, &DrawManager3dDescriptor::default())?;
+        DrawManager3d::new(device, queue, FORMAT, &DrawManager3dDescriptor::default())?;
 
     draw_manager.set_camera(camera());
     draw_manager.set_culling(culling);
@@ -291,7 +290,7 @@ fn culling_counts(
 
     let total = (inside.len() + outside.len()) as u32;
     draw_manager.register(object);
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     // `DrawIndexedIndirectArgs` は 32 ビット 5 つ。instance_count はその 2 番目。
     let args_size = size_of::<u32>() as u64 * 5;

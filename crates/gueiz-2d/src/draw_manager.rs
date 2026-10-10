@@ -1075,6 +1075,11 @@ pub struct Pick {
 }
 
 pub struct DrawManager {
+    /// 作るときに受け取ったデバイスとキュー。**持っている資源はすべてこれに結び付いている**ので、
+    /// 後から別のものを渡せるようにはしない。中身は参照を数える取っ手で、写しても同じものを指す。
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+
     render_pipeline: wgpu::RenderPipeline,
     cull_pipeline: wgpu::ComputePipeline,
     render_bind_group: wgpu::BindGroup,
@@ -1398,6 +1403,8 @@ impl DrawManager {
         );
 
         Ok(Self {
+            device: device.clone(),
+            queue: queue.clone(),
             render_pipeline,
             cull_pipeline,
             render_bind_group,
@@ -1569,19 +1576,15 @@ impl DrawManager {
     /// #     draw_manager: &mut gueiz_2d::draw_manager::DrawManager,
     /// # ) -> Result<(), gueiz_2d::error::Gueiz2DError> {
     /// let sheet = SpriteSheet::new(device, queue, 32, 32, &[&[0u8; 32 * 32 * 4]], SpriteFilter::Nearest)?;
-    /// draw_manager.set_sprite_sheet(device, sheet);
+    /// draw_manager.set_sprite_sheet(sheet);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn set_sprite_sheet(
-        &mut self,
-        device: &wgpu::Device,
-        sprite_sheet: impl Into<Arc<SpriteSheet>>,
-    ) {
+    pub fn set_sprite_sheet(&mut self, sprite_sheet: impl Into<Arc<SpriteSheet>>) {
         let sprite_sheet = sprite_sheet.into();
 
         self.render_bind_group = build_render_bind_group(
-            device,
+            &self.device,
             RenderBindings {
                 layout: &self.render_bind_group_layout,
                 pool: self.pool_heap.buffer(),
@@ -1606,37 +1609,32 @@ impl DrawManager {
     ///
     /// ```no_run
     /// # fn run(
-    /// #     device: &gueiz_2d::wgpu::Device,
-    /// #     queue: &gueiz_2d::wgpu::Queue,
     /// #     draw_manager: &mut gueiz_2d::draw_manager::DrawManager,
     /// #     star: &gueiz_2d::object::Object,
     /// #     photo: &mut gueiz_2d::object::Object,
     /// # ) {
     /// use gueiz_2d::clip::ClipMaskKind;
     ///
-    /// let mask = draw_manager.add_clip_mask(device, queue, star, ClipMaskKind::Coverage);
+    /// let mask = draw_manager.add_clip_mask(star, ClipMaskKind::Coverage);
     /// photo.effect(mask.block());
     /// # }
     /// ```
-    pub fn add_clip_mask(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        shape: &Object,
-        kind: ClipMaskKind,
-    ) -> ClipMask {
+    pub fn add_clip_mask(&mut self, shape: &Object, kind: ClipMaskKind) -> ClipMask {
+        // 持っている取っ手の写し。中身は同じデバイスとキューで、`self` を借りたまま渡せる。
+        let (device, queue) = (self.device.clone(), self.queue.clone());
+
         let layer = match self.clip_masks.take() {
             Some(layer) => layer,
             None => {
-                self.clip_masks.grow(device, queue);
-                self.rebuild_render_bind_group(device);
+                self.clip_masks.grow(&device, &queue);
+                self.rebuild_render_bind_group(&device);
 
                 // 増やした直後なので必ず空きがある。
                 self.clip_masks.take().expect("層を増やしたのに空きがない")
             }
         };
 
-        let mask = self.bake(queue, layer, shape, kind);
+        let mask = self.bake(&queue, layer, shape, kind);
 
         self.clip_mask_bounds.insert(layer, mask.bounds());
         mask
@@ -1646,13 +1644,9 @@ impl DrawManager {
     ///
     /// **覆う範囲は変わります。** 形が動いたなら、積み直すか
     /// [`ClipMask::block`] を取り直してください。
-    pub fn update_clip_mask(
-        &mut self,
-        queue: &wgpu::Queue,
-        mask: ClipMask,
-        shape: &Object,
-    ) -> ClipMask {
-        let updated = self.bake(queue, mask.layer(), shape, mask.kind());
+    pub fn update_clip_mask(&mut self, mask: ClipMask, shape: &Object) -> ClipMask {
+        let queue = self.queue.clone();
+        let updated = self.bake(&queue, mask.layer(), shape, mask.kind());
 
         self.clip_mask_bounds.insert(mask.layer(), updated.bounds());
         updated
@@ -1662,10 +1656,10 @@ impl DrawManager {
     ///
     /// **捨てた覆いの山を積んだままにしないこと。** 層が使い回されると
     /// 別の形で削られます。
-    pub fn remove_clip_mask(&mut self, queue: &wgpu::Queue, mask: ClipMask) {
+    pub fn remove_clip_mask(&mut self, mask: ClipMask) {
         let blank = vec![0u8; (self.clip_masks.resolution * self.clip_masks.resolution) as usize];
 
-        self.clip_masks.write(queue, mask.layer(), &blank);
+        self.clip_masks.write(&self.queue, mask.layer(), &blank);
         self.clip_masks.give_back(mask.layer());
         self.clip_mask_bounds.remove(&mask.layer());
     }
@@ -1853,9 +1847,9 @@ impl DrawManager {
     ///
     /// ```no_run
     /// # use gueiz_2d::effect::{CustomBlock, EffectStage, CUSTOM_KIND_BASE};
-    /// # fn run(device: &gueiz_2d::wgpu::Device, draw_manager: &mut gueiz_2d::draw_manager::DrawManager)
+    /// # fn run(draw_manager: &mut gueiz_2d::draw_manager::DrawManager)
     /// #     -> Result<(), gueiz_2d::error::Gueiz2DError> {
-    /// draw_manager.set_custom_blocks(device, &[CustomBlock {
+    /// draw_manager.set_custom_blocks(&[CustomBlock {
     ///     kind: CUSTOM_KIND_BASE,
     ///     stage: EffectStage::Color,
     ///     body: String::from("return color * block.color_a;"),
@@ -1863,11 +1857,9 @@ impl DrawManager {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn set_custom_blocks(
-        &mut self,
-        device: &wgpu::Device,
-        blocks: &[CustomBlock],
-    ) -> Result<(), Gueiz2DError> {
+    pub fn set_custom_blocks(&mut self, blocks: &[CustomBlock]) -> Result<(), Gueiz2DError> {
+        let device = &self.device;
+
         for block in blocks {
             if block.kind < CUSTOM_KIND_BASE {
                 return Err(Gueiz2DError::ReservedBlockKindError(block.kind));
@@ -1931,7 +1923,10 @@ impl DrawManager {
     ///
     /// [`DrawManager::draw`] の前に呼ぶ。コンピュートパスは専用のコマンドバッファで
     /// 先に投入されるので、描画側はその結果を読むだけでよい。
-    pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<(), Gueiz2DError> {
+    pub fn prepare(&mut self) -> Result<(), Gueiz2DError> {
+        // 持っている取っ手の写し。中身は同じデバイスとキューで、`self` を借りたまま渡せる。
+        let (device, queue) = (&self.device.clone(), &self.queue.clone());
+
         if self.pool_dirty || self.objects.iter().any(Object::is_geometry_dirty) {
             self.rebuild_pool(queue)?;
         }

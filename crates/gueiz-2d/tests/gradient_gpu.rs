@@ -158,7 +158,7 @@ fn render(draw_manager: &mut DrawManager) -> Vec<u8> {
         mapped_at_creation: false,
     });
 
-    draw_manager.prepare(device, queue).expect("支度に失敗した");
+    draw_manager.prepare().expect("支度に失敗した");
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("gradient gpu test"),

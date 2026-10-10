@@ -137,7 +137,7 @@ fn run(
     queue: &wgpu::Queue,
     draw_manager: &mut DrawManager,
 ) -> Result<[u32; 2], Box<dyn Error>> {
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     // `DrawIndirectArgs` は u32 4 つ。instance_count はその 2 番目。
     let args_size = size_of::<u32>() as u64 * 4;

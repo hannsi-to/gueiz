@@ -689,13 +689,9 @@ impl Application {
             return;
         };
 
-        let (Some(device), Some(queue)) = (self.renderer.device(), self.renderer.queue()) else {
-            return;
-        };
-
         scene.draw_manager.set_time(self.clock);
 
-        if let Err(error) = scene.draw_manager.prepare(device, queue) {
+        if let Err(error) = scene.draw_manager.prepare() {
             log::error!("failed to prepare the frame: {error}");
             return;
         }
@@ -911,7 +907,7 @@ impl Scene {
         let mut draw_manager = DrawManager::new(device, queue, format, &descriptor)?;
 
         // 「Custom (縞)」の中身。自前の WGSL を 1 つだけ積んでおく。
-        draw_manager.set_custom_blocks(device, &[custom_stripes()])?;
+        draw_manager.set_custom_blocks(&[custom_stripes()])?;
 
         // 窓を引っぱっても並びが崩れないよう、収まるように拡大する。
         let mut camera = Camera::orthographic_2d(width, height);
@@ -931,7 +927,7 @@ impl Scene {
 
             // 焼いた覆いは、図形と同じ座標で焼いてから積む。
             if let Some(kind) = tile.mask {
-                let mask = draw_manager.add_clip_mask(device, queue, &notch(), kind);
+                let mask = draw_manager.add_clip_mask(&notch(), kind);
                 object.effect(shifted(mask.block(), x, y));
             }
 
@@ -1164,7 +1160,7 @@ fn paint_gallery(
     let mut draw_manager =
         DrawManager::new(device, queue, FORMAT, &DrawManagerDescriptor::default())?;
 
-    draw_manager.set_custom_blocks(device, &[custom_stripes()])?;
+    draw_manager.set_custom_blocks(&[custom_stripes()])?;
 
     let camera = Camera::orthographic_2d(width as f32, height as f32);
 
@@ -1177,7 +1173,7 @@ fn paint_gallery(
         }
 
         if let Some(kind) = tile.mask {
-            let mask = draw_manager.add_clip_mask(device, queue, &notch(), kind);
+            let mask = draw_manager.add_clip_mask(&notch(), kind);
             object.effect(shifted(mask.block(), x, y));
         }
 
@@ -1193,7 +1189,7 @@ fn paint_gallery(
     }
 
     draw_manager.set_time(time);
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     let stride = padded_row(width);
     let mut processor = PostProcessor::new(device, FORMAT.into());

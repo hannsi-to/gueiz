@@ -121,7 +121,7 @@ fn prepared(manager: &mut DrawManager) {
     let gpu = gpu().expect("呼ぶ前に gpu!() で確かめること");
 
     manager
-        .prepare(&gpu.device, &gpu.queue)
+        .prepare()
         .expect("支度に失敗した");
 }
 

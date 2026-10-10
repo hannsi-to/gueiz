@@ -1,5 +1,6 @@
 use gueiz_gpu::camera::ScaleMode;
 use gueiz_gpu::renderer::SurfaceSize;
+use crate::clip::ClipMask;
 use crate::draw_manager::DrawManager;
 use crate::resource::Resources;
 
@@ -11,6 +12,7 @@ pub struct WindowItemArguments1<'a> {
     pub item_x: f32,
     pub item_y: f32,
     pub width: f32,
+    pub clip_mask: ClipMask,
     pub surface_size: SurfaceSize,
     pub scale_mode: ScaleMode,
     pub design: [f32; 2],

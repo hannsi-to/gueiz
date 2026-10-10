@@ -2,6 +2,7 @@ use log::error;
 use ttf_parser::Width;
 use gueiz_gpu::error::Gueiz2DError;
 use gueiz_gpu::renderer::SurfaceSize;
+use crate::clip::ClipMaskKind;
 use crate::draw_manager::DrawManager;
 use crate::font::Font;
 use crate::format::Token::Text;
@@ -117,7 +118,12 @@ impl WindowItem for Label {
             width: window_item_arguments.width,
             scale_mode: window_item_arguments.scale_mode,
         }));
-
+        for name in text_label.shape_ids() {
+            if let Some(object) = window_item_arguments.draw_manager.object_mut(name) {
+                object.effect(window_item_arguments.clip_mask.block());
+            }
+        }
+        
         let Some(font) = window_item_arguments.resources.font(self.label_font.base_font) else {
             log::warn!("the title font is not in the resources; the title is not drawn");
             return (0.0, 0.0);

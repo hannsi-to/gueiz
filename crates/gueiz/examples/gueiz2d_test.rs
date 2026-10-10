@@ -97,11 +97,7 @@ impl Application {
             return;
         };
 
-        let (Some(device), Some(queue)) = (self.renderer.device(), self.renderer.queue()) else {
-            return;
-        };
-
-        if let Err(error) = scene.draw_manager.prepare(device, queue) {
+        if let Err(error) = scene.draw_manager.prepare() {
             log::error!("failed to prepare the frame: {error}");
             return;
         }

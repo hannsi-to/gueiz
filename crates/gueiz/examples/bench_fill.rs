@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut processor = PostProcessor::new(&device, SURFACE_FORMAT.into());
     let mut scene = scattered_scene(&device, &queue, 600, 0)?;
-    scene.prepare(&device, &queue)?;
+    scene.prepare()?;
 
     let mut baseline = 0.0_f64;
 
@@ -238,7 +238,7 @@ fn measure(
 ) -> Result<f64, Box<dyn Error>> {
     // 形もインスタンスも動かさないので、コンピュートパスは 1 度でよい。
     // ここで測りたいのは塗りの値段だけ。
-    scene.prepare(device, queue)?;
+    scene.prepare()?;
 
     let mut total = 0.0_f64;
 

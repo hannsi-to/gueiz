@@ -432,7 +432,7 @@ fn present(
     target: &Target,
     draw_manager: &mut DrawManager,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("atlas test"),

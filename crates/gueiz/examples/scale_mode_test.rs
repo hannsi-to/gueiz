@@ -209,7 +209,7 @@ fn render(
     square.instance(instance::create_instance());
 
     draw_manager.register(square);
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("scale mode"),

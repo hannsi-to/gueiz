@@ -5,9 +5,11 @@ use wgpu::Color;
 use wgpu::naga::CooperativeRole::C;
 use wgpu::naga::SwizzleComponent::W;
 use wgpu::wgc::binding_model::GetBindGroupLayoutError;
+use wgpu::wgc::impl_parent_device;
 use gueiz_gpu::camera::ScaleMode;
 use gueiz_gpu::renderer::SurfaceSize;
 use gueiz_gpu::vertex::Vertex;
+use crate::clip::ClipMaskKind;
 use crate::draw_manager::DrawManager;
 use crate::gui::window_item::{WindowItemArguments1, WindowItem, WindowItemArguments2};
 use crate::instance::create_instance;
@@ -193,7 +195,9 @@ impl WindowFrame {
         text_title.camera_for(surface_size, design, self.scale_mode);
         text_title.color(self.window_theme.text_title_color.r,self.window_theme.text_title_color.g,self.window_theme.text_title_color.b,self.window_theme.text_title_color.a);
         text_title.text_layout_data(self.title_layout_data());
+        self.text_title = Some(text_title);
 
+        let clip_mask = draw_manager.add_clip_mask(&frame, ClipMaskKind::Distance);
         draw_manager.register(frame);
         draw_manager.register(title_bar);
         draw_manager.register(frame_outline);
@@ -214,6 +218,7 @@ impl WindowFrame {
                     item_x,
                     item_y,
                     width,
+                    clip_mask,
                     surface_size,
                     scale_mode: self.scale_mode,
                     design
@@ -387,7 +392,6 @@ impl WindowFrame {
 
     /// 題名の字を登録する。書体が読めなければ、題名を出さずに続ける。
     fn register_title(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
-        // 題名が無ければ書体は読まない。書体の無い環境でも枠だけは出せる。
         if self.title.is_empty() {
             return;
         }
@@ -395,6 +399,7 @@ impl WindowFrame {
             log::warn!("the title font is not in the resources; the title is not drawn");
             return;
         };
+        // 題名が無ければ書体は読まない。書体の無い環境でも枠だけは出せる。
         if let Some(text_title) = self.text_title.as_mut() {
             text_title.register_draw_manager(draw_manager, &font).expect("Failed to register draw manager");
         }

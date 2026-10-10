@@ -260,7 +260,7 @@ fn render_with(
     )?;
 
     if !custom.is_empty() {
-        draw_manager.set_custom_blocks(device, custom)?;
+        draw_manager.set_custom_blocks(custom)?;
     }
 
     let mut square = object::create_object("Square");
@@ -275,7 +275,7 @@ fn render_with(
 
     draw_manager.register(square);
     draw_manager.set_time(0.0);
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("effect test"),

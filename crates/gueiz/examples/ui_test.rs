@@ -92,11 +92,7 @@ impl Application {
             return;
         };
 
-        let (Some(device), Some(queue)) = (self.renderer.device(), self.renderer.queue()) else {
-            return;
-        };
-
-        if let Err(error) = scene.draw_manager.prepare(device,queue) {
+        if let Err(error) = scene.draw_manager.prepare() {
             log::error!("failed to prepare the frame: {error}");
             return;
         }
@@ -267,7 +263,7 @@ impl Scene {
             30.0,
             Gap {
                 x: 5.0,
-                y: 0.0,
+                y: 5.0,
             },
             WindowFont {
                 base_font: font_handle,
@@ -305,29 +301,29 @@ impl Scene {
                 }
             }
         );
-        // window_frame.add_window_item(
-        //     Box::new(
-        //         Label::new(
-        //             "TestLabel1".to_string(),
-        //             32.0,
-        //             Gap {
-        //                 x: 0.0,
-        //                 y: 0.0,
-        //             },
-        //             LabelFont {
-        //                 base_font: font_handle,
-        //             },
-        //             LabelTheme {
-        //                 label_color: ThemeColor {
-        //                     r: 0.0,
-        //                     g: 0.0,
-        //                     b: 0.0,
-        //                     a: 1.0,
-        //                 },
-        //             }
-        //         )
-        //     )
-        // );
+        window_frame.add_window_item(
+            Box::new(
+                Label::new(
+                    "TestLabel1".to_string(),
+                    32.0,
+                    Gap {
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    LabelFont {
+                        base_font: font_handle,
+                    },
+                    LabelTheme {
+                        label_color: ThemeColor {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                    }
+                )
+            )
+        );
         window_frame.create_object(
             &mut draw_manager,
             &resources,

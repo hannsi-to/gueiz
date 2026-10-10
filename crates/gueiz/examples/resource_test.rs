@@ -190,7 +190,7 @@ fn draw_sprite(
         DrawManager::new(device, queue, FORMAT, &DrawManagerDescriptor::default())?;
 
     assert!(
-        resources.use_sprite_sheet(device, &mut draw_manager, sheet),
+        resources.use_sprite_sheet(&mut draw_manager, sheet),
         "シートを差せなかった",
     );
 
@@ -215,7 +215,7 @@ fn draw_with_effect(
         DrawManager::new(device, queue, FORMAT, &DrawManagerDescriptor::default())?;
 
     // 預かっているエフェクトを全部差し込む。
-    resources.apply_effects(device, &mut draw_manager)?;
+    resources.apply_effects(&mut draw_manager)?;
 
     let mut square = white_square();
     square.effect(resources.effect_block(effect, [param, 0.0, 0.0, 0.0], [1.0; 4]));
@@ -280,7 +280,7 @@ fn render(
     target: &Target,
     draw_manager: &mut DrawManager,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("resource test"),

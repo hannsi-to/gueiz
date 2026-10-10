@@ -36,7 +36,7 @@
 //! let block = resources.effect_block(stripes, [0.0; 4], [1.0, 0.0, 0.0, 1.0]);
 //!
 //! // シェーダに差し込むのは 1 回だけ。
-//! resources.apply_effects(device, draw_manager)?;
+//! resources.apply_effects(draw_manager)?;
 //!
 //! let font = resources.font(arial).expect("読み込んである");
 //! # let _ = (block, font);
@@ -260,17 +260,12 @@ impl Resources {
     ///
     /// [`DrawManager`] が持てるシートは 1 枚だけなので、差した時点で
     /// 前のものは見えなくなります。消えるわけではありません。
-    pub fn use_sprite_sheet(
-        &mut self,
-        device: &wgpu::Device,
-        draw_manager: &mut DrawManager,
-        handle: SpriteSheetHandle,
-    ) -> bool {
+    pub fn use_sprite_sheet(&mut self, draw_manager: &mut DrawManager, handle: SpriteSheetHandle) -> bool {
         let Some(sheet) = self.sheets.get(handle).map(Arc::clone) else {
             return false;
         };
 
-        draw_manager.set_sprite_sheet(device, sheet);
+        draw_manager.set_sprite_sheet(sheet);
         true
     }
 
@@ -433,7 +428,7 @@ impl Resources {
                 .is_none_or(|bound| !Arc::ptr_eq(bound, sheet));
 
             if changed {
-                draw_manager.set_sprite_sheet(device, Arc::clone(sheet));
+                draw_manager.set_sprite_sheet(Arc::clone(sheet));
                 self.bound_sheet = Some(Arc::clone(sheet));
             }
         }
@@ -616,11 +611,7 @@ impl Resources {
     /// 預かっている自前のエフェクトを全部シェーダに差し込む。
     ///
     /// パイプラインを組み直すので、**足し終わってから 1 回**呼びます。
-    pub fn apply_effects(
-        &self,
-        device: &wgpu::Device,
-        draw_manager: &mut DrawManager,
-    ) -> Result<(), Gueiz2DError> {
+    pub fn apply_effects(&self, draw_manager: &mut DrawManager) -> Result<(), Gueiz2DError> {
         let blocks: Vec<CustomBlock> = self
             .effects
             .iter()
@@ -631,7 +622,7 @@ impl Resources {
             })
             .collect();
 
-        draw_manager.set_custom_blocks(device, &blocks)
+        draw_manager.set_custom_blocks(&blocks)
     }
 
     /// 全部手放す。

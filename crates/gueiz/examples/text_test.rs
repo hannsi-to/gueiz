@@ -336,7 +336,7 @@ fn render_with_samples(
     let style = TextStyle::new(size);
     renderer.write(&mut draw_manager, font, text, &style, x, y)?;
 
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     // 均すときは多点の描き先に描いて、読み戻す側へ書き出す。
     let mut multisample = MultisampleTarget::new(sample_count);

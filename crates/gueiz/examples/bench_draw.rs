@@ -128,7 +128,7 @@ fn measure(
         }
         let after_animate = Instant::now();
 
-        draw_manager.prepare(device, queue)?;
+        draw_manager.prepare()?;
         let after_prepare = Instant::now();
 
         // ここまでの GPU 処理が終わるのを待つ。描画は含まないが、

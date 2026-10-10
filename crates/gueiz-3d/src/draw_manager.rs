@@ -188,6 +188,11 @@ struct MeshMetrics {
 
 /// 登録したメッシュをまとめて描く。
 pub struct DrawManager3d {
+    /// 作るときに受け取ったデバイスとキュー。**持っている資源はすべてこれに結び付いている**ので、
+    /// 後から別のものを渡せるようにはしない。中身は参照を数える取っ手で、写しても同じものを指す。
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+
     render_pipeline: wgpu::RenderPipeline,
     cull_pipeline: wgpu::ComputePipeline,
     render_bind_group: wgpu::BindGroup,
@@ -245,6 +250,7 @@ struct DepthBuffer {
 impl DrawManager3d {
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         surface_format: TextureFormat,
         descriptor: &DrawManager3dDescriptor,
     ) -> Result<Self, GpuError> {
@@ -461,6 +467,8 @@ impl DrawManager3d {
         );
 
         Ok(Self {
+            device: device.clone(),
+            queue: queue.clone(),
             render_pipeline,
             cull_pipeline,
             render_bind_group,
@@ -603,7 +611,10 @@ impl DrawManager3d {
     }
 
     /// メッシュが変わっていれば積み直し、コンピュートパスを投げる。
-    pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<(), GpuError> {
+    pub fn prepare(&mut self) -> Result<(), GpuError> {
+        // 持っている取っ手の写し。中身は同じデバイスとキューで、`self` を借りたまま渡せる。
+        let (device, queue) = (&self.device.clone(), &self.queue.clone());
+
         if self.meshes_dirty || self.objects.iter().any(Object3d::is_mesh_dirty) {
             self.rebuild_meshes(queue)?;
         }
@@ -640,19 +651,14 @@ impl DrawManager3d {
     }
 
     /// 深度バッファを用意する。大きさが変わっていたら作り直す。
-    pub fn depth_view(
-        &mut self,
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-    ) -> &wgpu::TextureView {
+    pub fn depth_view(&mut self, width: u32, height: u32) -> &wgpu::TextureView {
         let fits = self
             .depth
             .as_ref()
             .is_some_and(|depth| depth.width == width && depth.height == height);
 
         if !fits {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("gueiz3d depth"),
                 size: wgpu::Extent3d {
                     width,
@@ -686,7 +692,6 @@ impl DrawManager3d {
     /// 深度アタッチメントが要るので、パスの形が決まってしまう。
     pub fn draw(
         &mut self,
-        device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
         width: u32,
@@ -694,7 +699,7 @@ impl DrawManager3d {
         clear_color: wgpu::Color,
     ) {
         // 借用が重なるので、先に深度を用意して取り出す。
-        let depth_view = self.depth_view(device, width, height).clone();
+        let depth_view = self.depth_view(width, height).clone();
 
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("gueiz3d render pass"),

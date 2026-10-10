@@ -139,13 +139,11 @@ impl ApplicationHandler for Application {
             }
 
             WindowEvent::RedrawRequested => {
-                let (Some(scene), Some(device), Some(queue)) =
-                    (self.scene.as_mut(), self.renderer.device(), self.renderer.queue())
-                else {
+                let Some(scene) = self.scene.as_mut() else {
                     return;
                 };
 
-                if let Err(error) = scene.draw_manager.prepare(device, queue) {
+                if let Err(error) = scene.draw_manager.prepare() {
                     log::error!("failed to prepare the frame: {error}");
                     return;
                 }

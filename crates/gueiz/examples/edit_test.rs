@@ -136,7 +136,7 @@ fn vertex_count(
     queue: &wgpu::Queue,
     draw_manager: &mut DrawManager,
 ) -> Result<u32, Box<dyn Error>> {
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     // `DrawIndirectArgs` は u32 4 つ。vertex_count はその 1 番目。
     let args_size = size_of::<u32>() as u64 * 4;

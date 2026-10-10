@@ -225,7 +225,7 @@ fn render(draw_manager: &mut DrawManager) -> Vec<u8> {
         mapped_at_creation: false,
     });
 
-    draw_manager.prepare(device, queue).expect("支度に失敗した");
+    draw_manager.prepare().expect("支度に失敗した");
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("clip gpu test"),
@@ -595,7 +595,7 @@ fn masked_with(
     let gpu = gpu().expect("呼ぶ前に gpu!() で確かめること");
     let mut manager = manager(descriptor);
 
-    let mask = manager.add_clip_mask(&gpu.device, &gpu.queue, shape, kind);
+    let mask = manager.add_clip_mask(shape, kind);
 
     let mut object = canvas();
     object.effect(mask.block_with(softness, invert));
@@ -728,7 +728,7 @@ fn mask_layers_grow_when_they_run_out() {
     let shape = cross();
 
     for _ in 0..start + 5 {
-        manager.add_clip_mask(&gpu.device, &gpu.queue, &shape, ClipMaskKind::Coverage);
+        manager.add_clip_mask(&shape, ClipMaskKind::Coverage);
     }
 
     assert_eq!(manager.clip_mask_count() as u32, start + 5);
@@ -745,17 +745,17 @@ fn a_freed_layer_comes_back_round() {
     let mut manager = manager(&DrawManagerDescriptor::default());
     let shape = cross();
 
-    let first = manager.add_clip_mask(&gpu.device, &gpu.queue, &shape, ClipMaskKind::Coverage);
-    let second = manager.add_clip_mask(&gpu.device, &gpu.queue, &shape, ClipMaskKind::Coverage);
+    let first = manager.add_clip_mask(&shape, ClipMaskKind::Coverage);
+    let second = manager.add_clip_mask(&shape, ClipMaskKind::Coverage);
 
     assert_ne!(first.layer(), second.layer(), "同じ層を 2 枚に配っている");
 
     let capacity = manager.clip_mask_capacity();
-    manager.remove_clip_mask(&gpu.queue, first);
+    manager.remove_clip_mask(first);
 
     assert_eq!(manager.clip_mask_count(), 1);
 
-    let reused = manager.add_clip_mask(&gpu.device, &gpu.queue, &shape, ClipMaskKind::Coverage);
+    let reused = manager.add_clip_mask(&shape, ClipMaskKind::Coverage);
 
     assert_eq!(reused.layer(), first.layer(), "空いた層を使い回していない");
     assert_eq!(manager.clip_mask_capacity(), capacity, "使い回せるのに増えた");
@@ -767,7 +767,7 @@ fn rebaking_keeps_the_same_layer() {
     let gpu = gpu!();
     let mut manager = manager(&DrawManagerDescriptor::default());
 
-    let mask = manager.add_clip_mask(&gpu.device, &gpu.queue, &cross(), ClipMaskKind::Coverage);
+    let mask = manager.add_clip_mask(&cross(), ClipMaskKind::Coverage);
 
     let mut wider = create_object("Wide");
     wider.begin(PaintType::Fill);
@@ -776,7 +776,7 @@ fn rebaking_keeps_the_same_layer() {
     }
     wider.end();
 
-    let updated = manager.update_clip_mask(&gpu.queue, mask, &wider);
+    let updated = manager.update_clip_mask(mask, &wider);
 
     assert_eq!(updated.layer(), mask.layer());
     assert_eq!(updated.kind(), mask.kind());
@@ -789,8 +789,8 @@ fn a_distance_mask_reports_a_square_cover_and_a_spread() {
     let gpu = gpu!();
     let mut manager = manager(&DrawManagerDescriptor::default());
 
-    let coverage = manager.add_clip_mask(&gpu.device, &gpu.queue, &cross(), ClipMaskKind::Coverage);
-    let distance = manager.add_clip_mask(&gpu.device, &gpu.queue, &cross(), ClipMaskKind::Distance);
+    let coverage = manager.add_clip_mask(&cross(), ClipMaskKind::Coverage);
+    let distance = manager.add_clip_mask(&cross(), ClipMaskKind::Distance);
 
     assert_eq!(coverage.spread(), 0.0, "割合に広がりは無い");
     assert!(distance.spread() > 0.0, "距離の広がりが載っていない");

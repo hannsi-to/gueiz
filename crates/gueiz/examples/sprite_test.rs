@@ -280,17 +280,14 @@ fn draw(
         DrawManager::new(device, queue, FORMAT, &DrawManagerDescriptor::default())?;
 
     // 毎回シートを作り直す。差し替えが効いていることの確認も兼ねる。
-    draw_manager.set_sprite_sheet(
+    draw_manager.set_sprite_sheet(SpriteSheet::new(
         device,
-        SpriteSheet::new(
-            device,
-            queue,
-            SHEET,
-            SHEET,
-            &[&split_layer(), &solid_layer([0, 0, 255, 255])],
-            SpriteFilter::Nearest,
-        )?,
-    );
+        queue,
+        SHEET,
+        SHEET,
+        &[&split_layer(), &solid_layer([0, 0, 255, 255])],
+        SpriteFilter::Nearest,
+    )?);
 
     for sprite in sprites {
         let mut square = object::create_object("Sprite");
@@ -316,7 +313,7 @@ fn draw(
         draw_manager.register(square);
     }
 
-    draw_manager.prepare(device, queue)?;
+    draw_manager.prepare()?;
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("sprite test"),
