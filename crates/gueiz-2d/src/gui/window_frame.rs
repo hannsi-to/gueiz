@@ -9,7 +9,8 @@ use wgpu::wgc::impl_parent_device;
 use gueiz_gpu::camera::ScaleMode;
 use gueiz_gpu::renderer::SurfaceSize;
 use gueiz_gpu::vertex::Vertex;
-use crate::clip::ClipMaskKind;
+use crate::clip::{ClipMask, ClipMaskKind};
+use crate::effect::Block;
 use crate::draw_manager::DrawManager;
 use crate::gui::window_item::{WindowItemArguments1, WindowItem, WindowItemArguments2};
 use crate::instance::create_instance;
@@ -20,12 +21,14 @@ use crate::objects::polygon_rounded::CornerType;
 use crate::objects::rect::Rect;
 use crate::objects::rect_rounded::RectRounded;
 use crate::paint_type::{JointType, PaintType};
-use crate::text::{TextAlign, TextArea, TextLayoutData, TextLocation, TextRenderer, TextStyle};
+use crate::text::{measure, TextAlign, TextArea, TextLayoutData, TextLocation, TextRenderer, TextStyle};
 
 const CORNER_RADIUS: f32 = 10.0;
 const LINE_WIDTH: f32 = 1.0;
 
-/// 縮められる幅の下限。
+/// 縮められる幅の下限。題名を測れなかったとき（書体が無い・題名が空）に使います。
+///
+/// 測れたときは [`WindowFrame::min_width`] が題名の幅から決めます。
 pub const MIN_WIDTH: f32 = 120.0;
 /// 縁の**外側**で、大きさを変える取っ手になる幅。
 const HANDLE_OUTSIDE: f32 = 6.0;
@@ -57,6 +60,14 @@ pub struct WindowFrame {
     resize: Option<Resize>,
     hidden: bool,
     window_items: Vec<Box<dyn WindowItem>>,
+    /// 枠の形を焼いた覆い。部品の図形に積んで、窓からはみ出たぶんを削る。
+    ///
+    /// **組んだときの左上（`built_origin`）で焼いてあります。** 覆いはワールドに
+    /// 焼くので、枠を [`Object::translate`] でずらしても付いてきません。
+    /// 積むときに [`ClipMask::translated`] で同じだけずらします。
+    clip_mask: Option<ClipMask>,
+    /// 縮められる幅の下限。[`WindowFrame::create_object`] で題名を測って決める。
+    min_width: f32,
 }
 
 /// 掴んでいるあいだの覚え。
@@ -161,6 +172,8 @@ impl WindowFrame {
             resize: None,
             hidden: false,
             window_items: Vec::new(),
+            clip_mask: None,
+            min_width: MIN_WIDTH,
         }
     }
 
@@ -169,6 +182,10 @@ impl WindowFrame {
     }
 
     pub fn create_object(&mut self, draw_manager: &mut DrawManager, resources: &Resources, register_name: &str, surface_size: SurfaceSize, design: [f32; 2]) {
+        // 題名が収まる幅より狭くはしない。形を組む前に決める。
+        self.min_width = self.measure_min_width(resources);
+        self.frame_quad.width = self.frame_quad.width.max(self.min_width);
+
         // ずらす量はここからの差で出す。
         self.built_origin = [self.frame_quad.x, self.frame_quad.y];
 
@@ -198,6 +215,7 @@ impl WindowFrame {
         self.text_title = Some(text_title);
 
         let clip_mask = draw_manager.add_clip_mask(&frame, ClipMaskKind::Distance);
+        self.clip_mask = Some(clip_mask);
         draw_manager.register(frame);
         draw_manager.register(title_bar);
         draw_manager.register(frame_outline);
@@ -227,6 +245,9 @@ impl WindowFrame {
             item_y += item_size.1;
             counter += 1;
         }
+
+        // 部品の図形は、ここまでで全部登録されている。
+        self.apply_clip(draw_manager);
     }
 
     // --- 部品 ---
@@ -272,10 +293,11 @@ impl WindowFrame {
     /// 窓の大きさが変わった。枠の形・題名・部品をすべて今の大きさで組み直す。
     fn rebuild_all(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
         self.rebuild_shapes(draw_manager);
+        self.rebake_clip_mask(draw_manager);
         self.relayout_title(draw_manager, resources);
         self.rebuild_items(draw_manager, resources, );
 
-        // 組み直しで新しく出てきた図形（字の形など）には、まだずらしが掛かっていない。
+        // 組み直しで新しく出てきた図形（字の形など）には、まだずらしも覆いも掛かっていない。
         self.apply_offset(draw_manager);
     }
 
@@ -475,6 +497,31 @@ impl WindowFrame {
         [self.frame_quad.width, self.frame_quad.height]
     }
 
+    /// 縮められる幅の下限。題名が左右の余白ごと収まる幅です。
+    ///
+    /// [`WindowFrame::create_object`] より前は [`MIN_WIDTH`] を返します。
+    pub fn min_width(&self) -> f32 {
+        self.min_width
+    }
+
+    /// 題名を測って、幅の下限を出す。測れなければ [`MIN_WIDTH`]。
+    ///
+    /// 斜体や影で送り幅より右まで塗られることがあるので、塗られる右端も見ます。
+    /// 丸い角が潰れないよう、角 2 つぶんより狭くはしません。
+    fn measure_min_width(&self, resources: &Resources) -> f32 {
+        if self.title.is_empty() {
+            return MIN_WIDTH;
+        }
+        let Some(font) = resources.font(self.window_font.base_font) else {
+            return MIN_WIDTH;
+        };
+
+        let size = measure(&font, &self.title, &TextStyle::new(TITLE_SIZE));
+        let title_width = size.width.max(size.ink.right);
+
+        (title_width + self.gap.x * 2.0).max(CORNER_RADIUS * 2.0)
+    }
+
     /// 縮められる高さの下限。帯と、下の丸い角が収まるぶん。
     pub fn min_height(&self) -> f32 {
         self.title_bar_height + CORNER_RADIUS * 2.0
@@ -484,7 +531,7 @@ impl WindowFrame {
     ///
     /// 題名と部品も新しい幅で置き直します。
     pub fn set_size(&mut self, draw_manager: &mut DrawManager, resources: &Resources, width: f32, height: f32) {
-        self.frame_quad.width = width.max(MIN_WIDTH);
+        self.frame_quad.width = width.max(self.min_width);
         self.frame_quad.height = height.max(self.min_height());
 
         self.rebuild_all(draw_manager, resources);
@@ -547,6 +594,7 @@ impl WindowFrame {
     fn resized_quad(&self, resize: &Resize, delta: [f32; 2]) -> Quad {
         let start = &resize.start_quad;
         let handle = resize.handle;
+        let min_width = self.min_width;
         let min_height = self.min_height();
 
         let mut quad = Quad {
@@ -559,11 +607,11 @@ impl WindowFrame {
         // 左と上は、**向かいの縁を止めたまま**動かす。
         if handle.moves_left() {
             let right = start.x + start.width;
-            quad.x = (start.x + delta[0]).min(right - MIN_WIDTH);
+            quad.x = (start.x + delta[0]).min(right - min_width);
             quad.width = right - quad.x;
         }
         if handle.moves_right() {
-            quad.width = (start.width + delta[0]).max(MIN_WIDTH);
+            quad.width = (start.width + delta[0]).max(min_width);
         }
         if handle.moves_top() {
             let bottom = start.y + start.height;
@@ -599,6 +647,50 @@ impl WindowFrame {
         for name in self.object_names() {
             if let Some(object) = draw_manager.object_mut(&name) {
                 object.translate(x, y, 0.0);
+            }
+        }
+
+        // 覆いは枠と一緒には動かないので、ずらし直して積み直す。
+        self.apply_clip(draw_manager);
+    }
+
+    /// 枠の形を、いまの大きさで焼き直す。層はそのまま使い回す。
+    ///
+    /// 形は `built_origin` で組むので、焼いた覆いもそこに置かれます。
+    fn rebake_clip_mask(&mut self, draw_manager: &mut DrawManager) {
+        let Some(clip_mask) = self.clip_mask else {
+            return;
+        };
+        // 登録済みの枠を借りると draw_manager を二重に借りるので、同じ形を組み直して焼く。
+        let Some(frame) = self.build_shapes().into_iter().next() else {
+            return;
+        };
+
+        self.clip_mask = Some(draw_manager.update_clip_mask(clip_mask, &frame));
+    }
+
+    /// 部品の図形に、窓の外を削る覆いを積む。何度呼んでも 1 つにしかなりません。
+    ///
+    /// 覆いは `built_origin` で焼いてあるので、いまのずれだけずらしてから積みます。
+    fn apply_clip(&self, draw_manager: &mut DrawManager) {
+        let Some(clip_mask) = self.clip_mask else {
+            return;
+        };
+        let x = self.frame_quad.x - self.built_origin[0];
+        let y = self.frame_quad.y - self.built_origin[1];
+        let block = clip_mask.translated(x, y).block();
+        let layer = clip_mask.layer();
+
+        let is_frame_clip = |block: &Block| match block {
+            Block::ClipMask { layer: other, .. } | Block::ClipDistanceMask { layer: other, .. } => *other == layer,
+            _ => false,
+        };
+
+        for window_item in &self.window_items {
+            for name in window_item.object_names() {
+                if let Some(object) = draw_manager.object_mut(&name) {
+                    object.replace_effect(is_frame_clip, block);
+                }
             }
         }
     }

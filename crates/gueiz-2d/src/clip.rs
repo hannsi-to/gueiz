@@ -123,6 +123,19 @@ impl ClipMask {
         }
     }
 
+    /// 引く場所だけをずらした覆い。焼き直しは起きません。
+    ///
+    /// 覆いはワールドに焼いてあるので、元の形を [`crate::object::Object::translate`] で
+    /// 動かしても付いてきません。同じだけずらしてから山にしてください。
+    pub fn translated(self, x: f32, y: f32) -> Self {
+        let [min_x, min_y, width, height] = self.bounds;
+
+        Self {
+            bounds: [min_x + x, min_y + y, width, height],
+            ..self
+        }
+    }
+
     /// 何を焼いたか。
     pub fn kind(self) -> ClipMaskKind {
         self.kind
