@@ -49,39 +49,37 @@ impl Label {
             },
         }
     }
-}
-
-impl Label {
+    
     fn build_shapes(&self) -> Vec<Object> {
         vec![]
     }
 
-    fn text_layout_data(&self, create_object_arguments: &WindowItemArguments2) -> TextLayoutData {
+    fn text_layout_data(&self, window_item_arguments: &WindowItemArguments2) -> TextLayoutData {
         TextLayoutData {
             text: self.label.clone(),
             style: TextStyle::new(self.label_size),
             text_location: TextLocation::Area {
                 area: TextArea::new(
-                    create_object_arguments.item_x + self.gap.x,
-                    create_object_arguments.item_y + self.gap.y,
-                    create_object_arguments.width,
+                    window_item_arguments.item_x + self.gap.x,
+                    window_item_arguments.item_y + self.gap.y,
+                    window_item_arguments.width,
                     self.label_size
                 ).vertical(TextAlign::Center)
             }
         }
     }
 
-    fn relayout_data(&mut self, create_object_arguments: &mut WindowItemArguments2) -> (f32, f32) {
-        let layout_data = self.text_layout_data(create_object_arguments);
+    fn relayout_data(&mut self, window_item_arguments: &mut WindowItemArguments2) -> (f32, f32) {
+        let layout_data = self.text_layout_data(window_item_arguments);
 
-        let (Some(text_label), Some(font)) = (self.text_label.as_mut(), create_object_arguments.resources.font(self.label_font.base_font)) else {
+        let (Some(text_label), Some(font)) = (self.text_label.as_mut(), window_item_arguments.resources.font(self.label_font.base_font)) else {
             return (0.0, 0.0);
         };
 
-        text_label.clear(&mut create_object_arguments.draw_manager);
+        text_label.clear(&mut window_item_arguments.draw_manager);
         text_label.text_layout_data(layout_data);
 
-        match text_label.register_draw_manager(create_object_arguments.draw_manager, &font) {
+        match text_label.register_draw_manager(window_item_arguments.draw_manager, &font) {
             Ok(text_layout) => {
                 (self.gap.x + text_layout.width, self.gap.y + text_layout.height)
             }

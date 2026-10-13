@@ -13,6 +13,7 @@ use gueiz::gpu::camera::ScaleMode;
 use gueiz::gpu::msaa::DEFAULT_MULTISAMPLE;
 use gueiz::gpu::renderer::{Renderer, RendererBackend, SurfaceSize};
 use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::gui::image_label::{ImageLabel, ImageLabelTexture, ImageLabelTheme};
 use gueiz_2d::gui::label::{Label, LabelFont, LabelRegisterName, LabelTheme};
 use gueiz_2d::gui::window_frame::{DeviceId, Gap, Quad, ResizeHandle, ThemeColor, WindowFont, WindowFrame, WindowTheme};
 use gueiz_2d::instance::create_instance;
@@ -254,6 +255,11 @@ impl Scene {
         let mut resources = Resources::new();
         let font_handle = resources.load_font_file("font", font_path)?;
 
+        let image = image::open("images/image1.png")?.into_rgba8();
+        let (image_width, image_height) = image.dimensions();
+        let texture_handle = resources.load_texture("image", image_width, image_height, image.as_raw())?;
+        resources.commit_textures(device, queue, &mut draw_manager)?;
+
         let mut window_frame = WindowFrame::new(
             ScaleMode::Stretch,
             "TestWindow1".to_string(),
@@ -323,6 +329,35 @@ impl Scene {
                             b: 1.0,
                             a: 1.0,
                         },
+                    }
+                )
+            )
+        );
+        window_frame.add_window_item(
+            Box::new(
+                ImageLabel::new(
+                    image_width as f32,
+                    image_height as f32,
+                    Quad {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                    Gap {
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    ImageLabelTheme {
+                        texture_color: ThemeColor {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        }
+                    },
+                    ImageLabelTexture {
+                        texture_handle,
                     }
                 )
             )

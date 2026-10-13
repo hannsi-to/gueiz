@@ -16,6 +16,7 @@ gueiz-core = { path = "crates/gueiz-core" }
 gueiz-gpu = { path = "crates/gueiz-gpu" }
 gueiz-sound = { path = "crates/gueiz-sound" }
 gueiz-window = { path = "crates/gueiz-window" }
+image = { version = "0.25.6", default-features = false, features = ["png", "jpeg"] }
 log = "0.4.32"
 pollster = "1.0.1"
 rand = "0.10.3"
