@@ -1488,6 +1488,9 @@ impl TextRenderer {
     ///
     /// [`Rect::new`](crate::objects::rect::Rect::new) などと同じく、
     /// 名前は [`DrawManager`] の中でひとつにしてください。
+    ///
+    /// 登録した形はこの名前の組に入るので、[`DrawManager::group`] /
+    /// [`DrawManager::group_mut`] でこの名前から引けます。
     pub fn new(name: &str) -> Self {
         Self {
             name: String::from(name),
@@ -2087,7 +2090,7 @@ impl TextRenderer {
         object.camera(self.camera);
         object.z(self.z + layer.z_offset());
 
-        let name = draw_manager.register(object);
+        let name = draw_manager.register_in(&self.name, object);
         self.shapes.insert(key, Some(name));
 
         Ok(())
@@ -2154,7 +2157,7 @@ impl TextRenderer {
         object.camera(self.camera);
         object.z(self.z + layer.z_offset());
 
-        let name = draw_manager.register(object);
+        let name = draw_manager.register_in(&self.name, object);
         self.shapes.insert(key, Some(name));
 
         Ok(())

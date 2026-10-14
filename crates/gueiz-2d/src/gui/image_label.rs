@@ -1,5 +1,5 @@
 use gueiz_gpu::vertex::Vertex;
-use crate::gui::window_frame::{Gap, Quad, ThemeColor};
+use crate::gui::test_window_frame::{Gap, Quad, ThemeColor};
 use crate::gui::window_item::{WindowItem, WindowItemArguments1, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
@@ -63,16 +63,16 @@ impl ImageLabel {
                 window_item_arguments2.item_x + self.gap.x,
                 window_item_arguments2.item_y + self.gap.y,
                 0.0,
-                1.0,
-                1.0,
-                1.0,
-                1.0,
+                self.image_label_theme.texture_color.r,
+                self.image_label_theme.texture_color.g,
+                self.image_label_theme.texture_color.b,
+                self.image_label_theme.texture_color.a,
                 self.uv.x,
                 self.uv.y,
             ))
             .to(Vertex::new_position_color_uv(
-                self.width,
-                self.height,
+                window_item_arguments2.item_x + self.gap.x + self.width,
+                window_item_arguments2.item_y + self.gap.y + self.height,
                 0.0,
                 self.image_label_theme.texture_color.r,
                 self.image_label_theme.texture_color.g,

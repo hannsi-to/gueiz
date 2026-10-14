@@ -83,6 +83,7 @@ use crate::instance::Instance;
 use crate::object::Object;
 use crate::post::PostChain;
 use crate::sprite::SpriteSheet;
+use crate::text::TextRenderer;
 use crate::texture::TextureFormat;
 use crate::vertex::Vertex;
 
@@ -1116,6 +1117,12 @@ pub struct DrawManager {
     objects: Vec<Object>,
     /// 名前 → 番号。名前はここでひとつに保たれる。
     names: FxHashMap<String, usize>,
+    /// 組の名前 → 属する図形の番号（小さい順）。[`crate::text::TextRenderer`] のように、
+    /// ひとつの名前で複数の図形を登録するものを、その名前から引くために使う。
+    /// 図形は取り除かれないので、番号はずっと当てにできる。
+    groups: FxHashMap<String, Vec<usize>>,
+    /// 預かった [`TextRenderer`]。名前 → 本体。
+    text_renderers: FxHashMap<String, TextRenderer>,
     /// 全図形の三角形をつないだ置き場。**3D と共通の仕組み**。
     shape_pool: Pool<Vertex>,
     shape_metrics: Vec<ShapeMetrics>,
@@ -1432,6 +1439,8 @@ impl DrawManager {
             indirect,
             objects: Vec::new(),
             names: FxHashMap::default(),
+            groups: FxHashMap::default(),
+            text_renderers: FxHashMap::default(),
             shape_pool: Pool::new(),
             shape_metrics: Vec::new(),
             effect_ranges: Vec::new(),
@@ -1504,6 +1513,134 @@ impl DrawManager {
         self.effects_dirty = true;
 
         name
+    }
+
+    /// 組に入れて預ける。**返るのは、実際に付いた名前。**
+    ///
+    /// 名前の扱いは [`DrawManager::register`] と同じ。加えて、`group` の名前で
+    /// [`DrawManager::group`] / [`DrawManager::group_mut`] から引けるようになる。
+    /// [`crate::text::TextRenderer`] は作るときの名前を組の名前にして字形を登録する。
+    pub fn register_in(&mut self, group: &str, object: Object) -> String {
+        let index = self.objects.len();
+        let name = self.register(object);
+
+        self.groups.entry(String::from(group)).or_default().push(index);
+
+        name
+    }
+
+    /// その組の図形を全部。登録した順。組が無ければ空。
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::draw_manager::DrawManager;
+    /// # fn run(draw_manager: &DrawManager) {
+    /// // TextRenderer::new("title") で書いた字形を全部。
+    /// for glyph in draw_manager.group("title") {
+    ///     println!("{}", glyph.name());
+    /// }
+    /// # }
+    /// ```
+    pub fn group(&self, group: &str) -> impl Iterator<Item = &Object> {
+        self.group_indices(group)
+            .iter()
+            .filter_map(|&index| self.objects.get(index))
+    }
+
+    /// その組の図形を全部、書き換えられる形で。登録した順。組が無ければ空。
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::draw_manager::DrawManager;
+    /// # fn run(draw_manager: &mut DrawManager) {
+    /// for glyph in draw_manager.group_mut("title") {
+    ///     glyph.z(5.0);
+    /// }
+    /// # }
+    /// ```
+    pub fn group_mut(&mut self, group: &str) -> impl Iterator<Item = &mut Object> {
+        // 番号は小さい順に並んでいるので、前から突き合わせれば 1 回で拾える。
+        let indices = self.groups.get(group).map(Vec::as_slice).unwrap_or(&[]);
+        let mut wanted = indices.iter().copied().peekable();
+
+        self.objects
+            .iter_mut()
+            .enumerate()
+            .filter_map(move |(index, object)| {
+                if wanted.peek() == Some(&index) {
+                    wanted.next();
+                    Some(object)
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// その組に入っている図形の名前。登録した順。
+    pub fn group_names(&self, group: &str) -> impl Iterator<Item = &str> {
+        self.group(group).map(Object::name)
+    }
+
+    /// その名前の組があるか。
+    pub fn contains_group(&self, group: &str) -> bool {
+        self.groups.contains_key(group)
+    }
+
+    /// [`TextRenderer`] を預ける。以降は [`TextRenderer::name`] で引ける。
+    ///
+    /// 同じ名前のものがすでにあれば差し替え、前のものを返す。
+    pub fn add_text_renderer(&mut self, text_renderer: TextRenderer) -> Option<TextRenderer> {
+        self.text_renderers
+            .insert(String::from(text_renderer.name()), text_renderer)
+    }
+
+    /// 預かった [`TextRenderer`] を名前で引く。
+    pub fn text_renderer(&self, name: &str) -> Option<&TextRenderer> {
+        self.text_renderers.get(name)
+    }
+
+    /// 預かった [`TextRenderer`] を名前で引いて書き換える。
+    ///
+    /// 色やカメラを変えるだけならこれで足りる。字を置くなど
+    /// `DrawManager` も要る操作は [`DrawManager::with_text_renderer`] を使う。
+    pub fn text_renderer_mut(&mut self, name: &str) -> Option<&mut TextRenderer> {
+        self.text_renderers.get_mut(name)
+    }
+
+    /// 預かった [`TextRenderer`] と `DrawManager` を一緒に借りて `f` を呼ぶ。
+    /// 名前のものが無ければ `None`。
+    ///
+    /// `TextRenderer` の書き込みは `&mut DrawManager` を受け取るので、
+    /// 呼んでいる間だけ預かりから外して渡す。
+    ///
+    /// ```no_run
+    /// # use gueiz_2d::draw_manager::DrawManager;
+    /// # use gueiz_2d::font::Font;
+    /// # fn run(draw_manager: &mut DrawManager, font: &Font) {
+    /// draw_manager.with_text_renderer("title", |text, draw_manager| {
+    ///     text.clear(draw_manager);
+    ///     text.register_draw_manager(draw_manager, font)
+    /// });
+    /// # }
+    /// ```
+    pub fn with_text_renderer<R>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut TextRenderer, &mut DrawManager) -> R,
+    ) -> Option<R> {
+        let (key, mut text_renderer) = self.text_renderers.remove_entry(name)?;
+        let result = f(&mut text_renderer, self);
+
+        self.text_renderers.insert(key, text_renderer);
+
+        Some(result)
+    }
+
+    /// 預かった [`TextRenderer`] を返してもらう。登録した形は残る。
+    pub fn remove_text_renderer(&mut self, name: &str) -> Option<TextRenderer> {
+        self.text_renderers.remove(name)
+    }
+
+    fn group_indices(&self, group: &str) -> &[usize] {
+        self.groups.get(group).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// まだ使われていない名前を作る。`Square` → `Square 2` → `Square 3`。

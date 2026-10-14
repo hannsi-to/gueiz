@@ -15,7 +15,7 @@ use gueiz::gpu::renderer::{Renderer, RendererBackend, SurfaceSize};
 use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
 use gueiz_2d::gui::image_label::{ImageLabel, ImageLabelTexture, ImageLabelTheme};
 use gueiz_2d::gui::label::{Label, LabelFont, LabelRegisterName, LabelTheme};
-use gueiz_2d::gui::window_frame::{DeviceId, Gap, Quad, ResizeHandle, ThemeColor, WindowFont, WindowFrame, WindowTheme};
+use gueiz_2d::gui::test_window_frame::{DeviceId, Gap, Quad, QuadType, ResizeHandle, ThemeColor, WindowFont, WindowFrame, WindowTheme};
 use gueiz_2d::instance::create_instance;
 use gueiz_2d::object::Object;
 use gueiz_2d::resource::Resources;
@@ -60,7 +60,7 @@ impl Application {
     ///
     /// 引いているあいだは変えない。指が縁から外れても、引いている向きの形のままにする。
     fn update_cursor(&mut self, x: f32, y: f32) {
-        let (Some(window), Some(scene)) = (self.window.as_ref(), self.scene.as_ref()) else {
+        let (Some(window), Some(mut scene)) = (self.window.as_ref(), self.scene.as_mut()) else {
             return;
         };
 
@@ -68,7 +68,7 @@ impl Application {
             return;
         }
 
-        let cursor = match scene.window_frame.resize_handle_at(&scene.draw_manager, x, y) {
+        let cursor = match scene.window_frame.resize_handle_at(&mut scene.draw_manager, x, y) {
             Some(ResizeHandle::Left | ResizeHandle::Right) => CursorIcon::EwResize,
             Some(ResizeHandle::Top | ResizeHandle::Bottom) => CursorIcon::NsResize,
             Some(ResizeHandle::TopLeft | ResizeHandle::BottomRight) => CursorIcon::NwseResize,
@@ -261,9 +261,11 @@ impl Scene {
         resources.commit_textures(device, queue, &mut draw_manager)?;
 
         let mut window_frame = WindowFrame::new(
+            "TestWindowObject".to_string(),
             ScaleMode::Stretch,
             "TestWindow1".to_string(),
             Quad {
+                quad_type: QuadType::Normal,
                 x: 100.0,
                 y: 100.0,
                 width: 500.0,
@@ -339,6 +341,7 @@ impl Scene {
                     image_width as f32,
                     image_height as f32,
                     Quad {
+                        quad_type: QuadType::Normal,
                         x: 0.0,
                         y: 0.0,
                         width: 1.0,
@@ -365,7 +368,6 @@ impl Scene {
         window_frame.create_object(
             &mut draw_manager,
             &resources,
-            "TestWindowObject",
             surface_size,
             surface_size.to_logical(scale_factor),
         );
@@ -393,7 +395,7 @@ impl Scene {
             } => match (button, state) {
                 (ButtonSource::Mouse(MouseButton::Left), ElementState::Pressed) => {
                     self.window_frame.mouse_left_pressed(
-                        &self.draw_manager,
+                        &mut self.draw_manager,
                         position.x as f32,
                         position.y as f32,
                     )

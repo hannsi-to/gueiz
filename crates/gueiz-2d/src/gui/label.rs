@@ -6,7 +6,7 @@ use crate::clip::ClipMaskKind;
 use crate::draw_manager::DrawManager;
 use crate::font::Font;
 use crate::format::Token::Text;
-use crate::gui::window_frame::{Gap, ThemeColor};
+use crate::gui::test_window_frame::{Gap, ThemeColor};
 use crate::gui::window_item::{WindowItemArguments1, WindowItem, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
