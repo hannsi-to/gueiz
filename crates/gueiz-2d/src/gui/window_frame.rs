@@ -12,7 +12,10 @@ use gueiz_gpu::renderer::SurfaceSize;
 use gueiz_gpu::vertex::Vertex;
 use crate::effect::Block;
 use crate::draw_manager::DrawManager;
-use crate::gui::window_item::{replace_outline, WindowItemArguments1, WindowItem, WindowItemArguments2};
+use std::time::Instant;
+use crate::gui::clipboard::Clipboard;
+use crate::gui::context_menu::{ContextMenu, ContextMenuEvent, ContextMenuFont, ContextMenuLabels, ContextMenuLayout, ContextMenuStyle, ContextMenuTheme, INPUT_TEXT_CONTEXT_MENU};
+use crate::gui::window_item::{replace_outline, CursorShape, EditKey, KeyModifiers, WindowItemArguments1, WindowItem, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
 use crate::resource::{FontHandle, Resources};
@@ -82,6 +85,10 @@ pub struct WindowFrame {
     /// 題名の置き方で変わるのは幅だけなので、幅が同じなら置き直しを飛ばします
     /// （下の縁だけを引いたときなど）。
     title_layout_width: Option<f32>,
+    /// 右クリックのメニュー。部品より手前に出す。
+    context_menu: ContextMenu,
+    /// 部品が次に動かしてほしい時刻（キャレットの点滅など）。
+    next_update: Option<Instant>,
 }
 
 /// 図形に移し待ちの変更。
@@ -131,6 +138,16 @@ pub enum ResizeHandle {
 }
 
 impl ResizeHandle {
+    /// この取っ手の上で出す指の形。
+    pub fn cursor_shape(self) -> CursorShape {
+        match self {
+            Self::Left | Self::Right => CursorShape::ResizeHorizontal,
+            Self::Top | Self::Bottom => CursorShape::ResizeVertical,
+            Self::TopLeft | Self::BottomRight => CursorShape::ResizeNwse,
+            Self::TopRight | Self::BottomLeft => CursorShape::ResizeNesw,
+        }
+    }
+
     fn moves_left(self) -> bool {
         matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
     }
@@ -170,6 +187,7 @@ pub struct WindowFont {
     pub base_font_size: f32,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct ThemeColor {
     pub r: f32,
     pub g: f32,
@@ -206,6 +224,8 @@ impl WindowFrame {
             pending: Pending::default(),
             min_width: MIN_WIDTH,
             title_layout_width: None,
+            context_menu: ContextMenu::new(),
+            next_update: None,
         }
     }
 
@@ -282,6 +302,64 @@ impl WindowFrame {
         // 部品の図形は、ここまでで全部登録されている。
         self.refresh_owned_names(draw_manager);
         self.apply_clip(draw_manager);
+
+        // メニューは部品より後に作って、手前に出す。見た目を決めていなければ、窓のテーマから。
+        let (theme, font) = (&self.window_theme, &self.window_font);
+        self.context_menu.style_or(|| ContextMenuStyle {
+            font: ContextMenuFont { base_font: font.base_font, base_font_size: font.base_font_size },
+            theme: ContextMenuTheme {
+                fill_color: theme.frame_fill_color,
+                outline_color: theme.frame_outline_color,
+                text_color: theme.text_title_color,
+                sub_title_color: ThemeColor { a: theme.text_title_color.a * 0.6, ..theme.text_title_color },
+                highlight_color: theme.title_bar_slice_line_color,
+                shadow_color: ThemeColor { r: 0.0, g: 0.0, b: 0.0, a: 0.35 },
+                disabled_alpha: 0.35,
+            },
+            layout: ContextMenuLayout::default(),
+        });
+
+        // 文字を打ち込む欄のメニューが足されていなければ、いつものものを足す。
+        if !self.context_menu.has_menu(INPUT_TEXT_CONTEXT_MENU) {
+            self.context_menu.add_labels(ContextMenuLabels::text_input());
+        }
+
+        let base_name = self.register_name.frame.clone().unwrap_or_default();
+        self.context_menu.create(draw_manager, resources, &base_name, surface_size, design, self.scale_mode);
+    }
+
+    /// 右クリックのメニューの見た目（書体・色・形）を決める。[`WindowFrame::create_object`] より前に。
+    ///
+    /// 決めなければ、窓のテーマと書体から作ります。
+    pub fn set_context_menu_style(&mut self, style: ContextMenuStyle) {
+        self.context_menu.set_style(style);
+    }
+
+    /// 右クリックのメニューを足す。[`WindowFrame::create_object`] より前に。
+    ///
+    /// 部品は [`ContextMenuLabels::name`] でどのメニューを開くかを決めます。
+    /// 同じ名前のメニューがあれば差し替えます。
+    pub fn add_context_menu_labels(&mut self, labels: ContextMenuLabels) {
+        self.context_menu.add_labels(labels);
+    }
+
+    /// メニューで押された項目の関数を呼ぶ。押された項目が無ければ何もせず `false`。
+    ///
+    /// 関数は窓・[`DrawManager`]・[`Resources`]・クリップボードを使うので、
+    /// それらを持っている呼ぶ側（`gueiz::winit_gui` など）が、入力を渡したあとに呼びます。
+    pub fn run_context_menu_event(&mut self, draw_manager: &mut DrawManager, resources: &Resources, clipboard: &mut dyn Clipboard) -> bool {
+        let Some((menu, entry)) = self.context_menu.take_pending() else {
+            return false;
+        };
+        // 関数は窓の中にあるので、いったん借り出してから窓ごと渡す。
+        let Some(mut handler) = self.context_menu.take_handler(menu, entry) else {
+            return false;
+        };
+
+        handler(&mut ContextMenuEvent { window_frame: self, draw_manager, resources, clipboard });
+
+        self.context_menu.put_handler(menu, entry, handler);
+        true
     }
 
     // --- 部品 ---
@@ -541,6 +619,8 @@ impl WindowFrame {
 
             window_item.resize(draw_manager, surface_size, design);
         }
+
+        self.context_menu.resize(draw_manager, surface_size, design, self.scale_mode);
     }
 
     // --- フレームごと ---
@@ -549,6 +629,9 @@ impl WindowFrame {
     ///
     /// [`WindowFrame::mouse_moved`] は窓の場所と大きさを覚えるだけで、図形には触りません。
     /// 指の動きが 1 フレームに何度届いても、組み直しはここでの 1 回で済みます。
+    ///
+    /// 時間で動くもの（キャレットの点滅など）も、ここで進めます。
+    /// 次に動かしてほしい時刻は [`WindowFrame::next_update`] で分かります。
     ///
     /// 何か移したら `true`。
     pub fn update(&mut self, draw_manager: &mut DrawManager, resources: &Resources) -> bool {
@@ -561,7 +644,33 @@ impl WindowFrame {
             self.apply_offset(draw_manager);
         }
 
-        pending.rebuild || pending.offset
+        let now = Instant::now();
+        let mut relaid_out = false;
+        let mut next: Option<Instant> = None;
+
+        for window_item in &mut self.window_items {
+            let animation = window_item.animate(draw_manager, resources, now);
+            relaid_out |= animation.relaid_out;
+            next = match (next, animation.next) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+
+        // 並べ直しで増えた字の形にも、ずらしと覆いを掛ける。
+        if relaid_out && self.refresh_owned_names(draw_manager) {
+            self.apply_offset(draw_manager);
+        }
+
+        self.next_update = next;
+
+        pending.rebuild || pending.offset || relaid_out
+    }
+
+    /// 部品が次に動かしてほしい時刻。その時刻に描き直しを頼んでください。
+    /// 動くものが無ければ `None`（入力が来るまで待ってよい）。
+    pub fn next_update(&self) -> Option<Instant> {
+        self.next_update
     }
 
     // --- 動かす ---
@@ -644,7 +753,7 @@ impl WindowFrame {
     /// 取っ手は縁の外側に [`HANDLE_OUTSIDE`]、内側に [`HANDLE_INSIDE`] の幅です。
     /// 窓の内側の取っ手は、**手前にあるものが自分のものの時だけ**取ります。
     /// 別の窓がかぶさっているなら、そちらの中身です。
-    pub fn resize_handle_at(&self, draw_manager: &mut DrawManager, x: f32, y: f32) -> Option<ResizeHandle> {
+    pub fn resize_handle_at(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<ResizeHandle> {
         let [world_x, world_y] = self.to_world(draw_manager, x, y)?;
 
         let quad = &self.frame_quad;
@@ -781,6 +890,10 @@ impl WindowFrame {
             }
         }
 
+        for window_item in &mut self.window_items {
+            window_item.offset_changed(draw_manager, [x, y]);
+        }
+
         // 削る範囲はワールドで持つので、枠と一緒には動かない。いまの場所で積み直す。
         self.apply_clip(draw_manager);
     }
@@ -842,7 +955,10 @@ impl WindowFrame {
     }
 
     /// 持っている図形の名前を集め直す。図形が増えうるところ（作る・組み直す）の後で呼ぶ。
-    fn refresh_owned_names(&mut self, draw_manager: &mut DrawManager) {
+    ///
+    /// 前と同じ名前なら（新しい字の形が増えていなければ）何もせず `false`。
+    /// 変わったら `true` で、覆いは積み直しが要る印を付ける。
+    fn refresh_owned_names(&mut self, draw_manager: &mut DrawManager) -> bool {
         let mut names: Vec<String> = self.shape_names().into_iter().flatten().map(String::from).collect();
 
         if let Some(text_title) = &self.register_name.text_title {
@@ -855,8 +971,13 @@ impl WindowFrame {
             names.extend(window_item.object_names(draw_manager));
         }
 
+        if names == self.owned_names {
+            return false;
+        }
+
         self.owned_names = names;
         self.clip_stale = true;
+        true
     }
 
     /// この窓の図形か。字の形と部品の図形も入ります。
@@ -886,30 +1007,49 @@ impl WindowFrame {
     /// 掴むのは題名の帯の上だけです。中身の上で掴めると、中に置いたつまみが
     /// 動かせなくなります。
     pub fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+        // メニューが開いていれば、押したのは項目か、閉じるための外か。どちらもここで取る。
+        if self.context_menu.is_open() {
+            if !self.context_menu.press(draw_manager, x, y) {
+                self.context_menu.close(draw_manager);
+            }
+            return true;
+        }
+
         let Some(world) = self.to_world(draw_manager, x, y) else {
             return false;
         };
 
         if let Some(handle) = self.resize_handle_at(draw_manager, x, y) {
+            self.unfocus_items(draw_manager, None);
             self.resize = Some(Resize { handle, start_quad: self.frame_quad, start: world });
             return true;
         }
 
-        // 窓の外なら取らない。
+        // 窓の外なら取らない。押されたのはよそなので、フォーカスは手放す。
         if !self.frame_quad.hover(world[0], world[1]) {
+            self.unfocus_items(draw_manager, None);
             return false;
         }
         // 手前のものが自分の図形でなければ、別の窓がかぶさっている（A3）。
         match draw_manager.pick(x, y) {
             Some(pick) if self.owns(&pick.name) => {}
-            _ => return false,
+            _ => {
+                self.unfocus_items(draw_manager, None);
+                return false;
+            }
         }
 
         // 部品が先（A4）。取った部品があればそこで止める。
-        for window_item in &mut self.window_items {
-            if window_item.mouse_left_pressed(draw_manager, x, y) {
-                return true;
-            }
+        let taken = self
+            .window_items
+            .iter_mut()
+            .position(|window_item| window_item.mouse_left_pressed(draw_manager, x, y));
+
+        // 取った部品のほかは、フォーカスを手放す。
+        self.unfocus_items(draw_manager, taken);
+
+        if taken.is_some() {
+            return true;
         }
 
         // 帯の上なら掴む。題名の字の上でも掴めるよう、図形の名前ではなく範囲で見る。
@@ -919,6 +1059,183 @@ impl WindowFrame {
 
         // 窓の中身の上は、何も無くても後ろへは渡さない。
         true
+    }
+
+    /// その画素の位置で出したい指の形。
+    ///
+    /// - 縁を引いているあいだは、引いている取っ手の形のまま（指が縁から外れても）。
+    /// - 掴んで動かしているあいだは [`CursorShape::Move`]。
+    /// - 縁の上なら、その取っ手の形。
+    /// - 窓の中で手前がこの窓なら、指の下の部品に聞く。
+    pub fn cursor_shape(&self, draw_manager: &DrawManager, x: f32, y: f32) -> CursorShape {
+        if self.context_menu.contains(draw_manager, x, y) {
+            return CursorShape::Default;
+        }
+        if let Some(resize) = &self.resize {
+            return resize.handle.cursor_shape();
+        }
+        if self.drag.is_some() {
+            return CursorShape::Move;
+        }
+        if let Some(handle) = self.resize_handle_at(draw_manager, x, y) {
+            return handle.cursor_shape();
+        }
+
+        match draw_manager.pick(x, y) {
+            Some(pick) if self.owns(&pick.name) => {}
+            _ => return CursorShape::Default,
+        }
+
+        self.window_items
+            .iter()
+            .find_map(|window_item| window_item.cursor_shape(draw_manager, x, y))
+            .unwrap_or_default()
+    }
+
+    /// `keep` の部品のほかは、フォーカスを手放させる。見た目が変わったら `true`。
+    fn unfocus_items(&mut self, draw_manager: &mut DrawManager, keep: Option<usize>) -> bool {
+        let mut changed = false;
+
+        for (index, window_item) in self.window_items.iter_mut().enumerate() {
+            if Some(index) != keep {
+                changed |= window_item.unfocus(draw_manager);
+            }
+        }
+
+        changed
+    }
+
+    // --- キーボード ---
+
+    /// キーと文字を受け取りたい部品があるか。
+    pub fn has_focus(&self) -> bool {
+        self.window_items.iter().any(|window_item| window_item.has_focus())
+    }
+
+    /// IME を使いたい部品があるか。呼ぶ側はこれを見て IME を点けたり消したりする。
+    pub fn wants_ime(&self) -> bool {
+        self.window_items.iter().any(|window_item| window_item.wants_ime())
+    }
+
+    /// フォーカスを持っている部品に渡す。部品が図形を書き換えたら、
+    /// 名前を集め直して、新しい字の形にもずらしと覆いを掛ける。
+    fn with_focused_item(
+        &mut self,
+        draw_manager: &mut DrawManager,
+        f: impl FnOnce(&mut dyn WindowItem, &mut DrawManager) -> bool,
+    ) -> bool {
+        let Some(window_item) = self.window_items.iter_mut().find(|window_item| window_item.has_focus()) else {
+            return false;
+        };
+
+        if !f(window_item.as_mut(), draw_manager) {
+            return false;
+        }
+
+        // 字の形が増えたときだけ、新しい形にずらしと覆いを掛ける。
+        // キャレットを動かしただけなら、どの図形も前のままでよい。
+        if self.refresh_owned_names(draw_manager) {
+            self.apply_offset(draw_manager);
+        }
+
+        true
+    }
+
+    /// 文字が打たれた（IME で確定した文字も）。受け取った部品があれば `true`。
+    pub fn text_input(&mut self, draw_manager: &mut DrawManager, resources: &Resources, text: &str) -> bool {
+        self.with_focused_item(draw_manager, |window_item, draw_manager| {
+            window_item.text_input(draw_manager, resources, text)
+        })
+    }
+
+    /// IME で変換中の文字が変わった。
+    pub fn ime_preedit(&mut self, draw_manager: &mut DrawManager, resources: &Resources, text: &str, cursor: Option<usize>) -> bool {
+        self.with_focused_item(draw_manager, |window_item, draw_manager| {
+            window_item.ime_preedit(draw_manager, resources, text, cursor)
+        })
+    }
+
+    /// 文字を書き換えるキーが押された。
+    pub fn key_pressed(&mut self, draw_manager: &mut DrawManager, resources: &Resources, key: EditKey) -> bool {
+        // キーを押したらメニューは閉じる。Esc は閉じるだけ。
+        if self.context_menu.is_open() {
+            self.context_menu.close(draw_manager);
+            if key == EditKey::Escape {
+                return true;
+            }
+        }
+
+        self.with_focused_item(draw_manager, |window_item, draw_manager| {
+            window_item.key_pressed(draw_manager, resources, key)
+        })
+    }
+
+    /// Shift や Ctrl の押し具合が変わった。すべての部品に知らせる。
+    pub fn modifiers_changed(&mut self, modifiers: KeyModifiers) {
+        for window_item in &mut self.window_items {
+            window_item.modifiers_changed(modifiers);
+        }
+    }
+
+    /// フォーカスを持っている部品で選んでいる文字。コピーに使う。
+    pub fn selected_text(&self) -> Option<String> {
+        self.window_items
+            .iter()
+            .find(|window_item| window_item.has_focus())?
+            .selected_text()
+    }
+
+    /// 選んでいる文字をクリップボードへ入れる。何も選んでいなければ何もせず `false`。
+    pub fn copy_to_clipboard(&self, clipboard: &mut dyn Clipboard) -> bool {
+        self.selected_text().is_some_and(|text| clipboard.set_text(&text))
+    }
+
+    /// 選んでいる文字をクリップボードへ入れて消す。何も選んでいなければ何もせず `false`。
+    pub fn cut_to_clipboard(&mut self, draw_manager: &mut DrawManager, resources: &Resources, clipboard: &mut dyn Clipboard) -> bool {
+        let Some(text) = self.selected_text() else {
+            return false;
+        };
+        if !clipboard.set_text(&text) {
+            return false;
+        }
+
+        self.key_pressed(draw_manager, resources, EditKey::Delete)
+    }
+
+    /// クリップボードの文字を貼り付ける。
+    pub fn paste_from_clipboard(&mut self, draw_manager: &mut DrawManager, resources: &Resources, clipboard: &mut dyn Clipboard) -> bool {
+        let Some(text) = clipboard.get_text() else {
+            return false;
+        };
+
+        self.paste(draw_manager, resources, &text)
+    }
+
+    /// 文字を、フォーカスを持っている部品に貼り付ける（打った文字と違い、1 回で元に戻せる）。
+    pub fn paste(&mut self, draw_manager: &mut DrawManager, resources: &Resources, text: &str) -> bool {
+        self.with_focused_item(draw_manager, |window_item, draw_manager| {
+            window_item.paste(draw_manager, resources, text)
+        })
+    }
+
+    /// 字を打つ位置を、**画面の画素**で（`[x, y, 幅, 高さ]`）。IME の候補を出す場所に使う。
+    ///
+    /// フォーカスを持っている部品が無ければ `None`。
+    pub fn ime_cursor_area(&self, draw_manager: &DrawManager) -> Option<[f32; 4]> {
+        let [x, y, width, height] = self
+            .window_items
+            .iter()
+            .find(|window_item| window_item.has_focus())?
+            .caret_area()?;
+
+        // 部品は組んだときの座標で答えるので、窓のずれを足してワールドにする。
+        let offset = [self.frame_quad.x - self.built_origin[0], self.frame_quad.y - self.built_origin[1]];
+        let camera = draw_manager.object(self.register_name.title_bar.as_deref()?)?.view_camera();
+
+        let [left, top] = camera.world_to_screen(x + offset[0], y + offset[1]);
+        let [right, bottom] = camera.world_to_screen(x + width + offset[0], y + height + offset[1]);
+
+        Some([left.min(right), top.min(bottom), (right - left).abs(), (bottom - top).abs()])
     }
 
     /// 左を放した。掴んでいたか、縁を引いていたら `true`。
@@ -935,9 +1252,36 @@ impl WindowFrame {
         dragged || resized || item_changed
     }
 
-    pub fn mouse_right_pressed(&mut self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
-        let _ = (draw_manager, x, y);
-        false
+    /// 右を押した。部品がメニューの項目を返したら、指の位置にメニューを開く。**この窓が取ったら `true`。**
+    pub fn mouse_right_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+        if self.context_menu.is_open() {
+            self.context_menu.close(draw_manager);
+        }
+
+        let Some(world) = self.to_world(draw_manager, x, y) else {
+            return false;
+        };
+        if !self.frame_quad.hover(world[0], world[1]) {
+            return false;
+        }
+        match draw_manager.pick(x, y) {
+            Some(pick) if self.owns(&pick.name) => {}
+            _ => return false,
+        }
+
+        let opened = self
+            .window_items
+            .iter_mut()
+            .enumerate()
+            .find_map(|(index, window_item)| window_item.context_menu(draw_manager, x, y).map(|request| (index, request)));
+
+        if let Some((index, request)) = opened {
+            self.unfocus_items(draw_manager, Some(index));
+            self.context_menu.open(draw_manager, &request.menu, world, request.state);
+        }
+
+        // 窓の中身の上は、メニューが無くても後ろへは渡さない。
+        true
     }
 
     pub fn mouse_right_released(&mut self) -> bool {
@@ -955,6 +1299,11 @@ impl WindowFrame {
     /// 掴んでも引いてもいなければ、部品に渡します（指が上に来たら色を変えるなど）。
     /// 部品の見た目が変わったときも `true`。
     pub fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+        // メニューが開いているあいだは、指の下の項目を光らせるだけ。
+        if self.context_menu.is_open() {
+            return self.context_menu.hover(draw_manager, x, y);
+        }
+
         if self.resize.is_some() {
             return self.resize_moved(draw_manager, x, y);
         }

@@ -1,24 +1,21 @@
 use std::error::Error;
 use std::sync::Arc;
-use log::info;
-use wgpu::Color;
-use wgpu::hal::DynCommandEncoder;
 use winit::application::ApplicationHandler;
-use winit::cursor::CursorIcon;
 use winit::dpi::LogicalSize;
-use winit::event::{ButtonSource, ElementState, MouseButton, WindowEvent};
+use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 use gueiz::gpu::camera::ScaleMode;
 use gueiz::gpu::msaa::DEFAULT_MULTISAMPLE;
 use gueiz::gpu::renderer::{Renderer, RendererBackend, SurfaceSize};
+use gueiz::winit_gui::WinitGui;
 use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
 use gueiz_2d::gui::button::{Button, ButtonFont, ButtonTheme};
+use gueiz_2d::gui::context_menu::{ContextMenuFont, ContextMenuLabel, ContextMenuLabels, ContextMenuLayout, ContextMenuSlicer, ContextMenuStyle, ContextMenuTheme, INPUT_TEXT_CONTEXT_MENU};
 use gueiz_2d::gui::image_label::{ImageLabel, ImageLabelTexture, ImageLabelTheme};
-use gueiz_2d::gui::label::{Label, LabelFont, LabelRegisterName, LabelTheme};
-use gueiz_2d::gui::window_frame::{DeviceId, Gap, Quad, QuadType, ResizeHandle, ThemeColor, WindowFont, WindowFrame, WindowTheme};
-use gueiz_2d::instance::create_instance;
-use gueiz_2d::object::Object;
+use gueiz_2d::gui::input_text::{InputText, InputTextFont, InputTextTheme};
+use gueiz_2d::gui::label::{Label, LabelFont, LabelTheme};
+use gueiz_2d::gui::window_frame::{Gap, Quad, QuadType, ThemeColor, WindowFont, WindowFrame, WindowTheme};
 use gueiz_2d::resource::Resources;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -40,8 +37,8 @@ struct Application {
     renderer: Renderer,
     window: Option<Arc<dyn Window>>,
     scene: Option<Scene>,
-    /// いま出している指の形。変わったときだけ窓に伝える。
-    cursor: CursorIcon,
+    /// winit の出来事を gui へ渡し、指の形と IME を窓に映す。
+    winit_gui: WinitGui,
 }
 
 impl Application {
@@ -53,33 +50,7 @@ impl Application {
             renderer,
             window: None,
             scene: None,
-            cursor: CursorIcon::Default,
-        }
-    }
-
-    /// 窓の縁の上なら、大きさを変える形の指にする。
-    ///
-    /// 引いているあいだは変えない。指が縁から外れても、引いている向きの形のままにする。
-    fn update_cursor(&mut self, x: f32, y: f32) {
-        let (Some(window), Some(mut scene)) = (self.window.as_ref(), self.scene.as_mut()) else {
-            return;
-        };
-
-        if scene.window_frame.is_resizing() {
-            return;
-        }
-
-        let cursor = match scene.window_frame.resize_handle_at(&mut scene.draw_manager, x, y) {
-            Some(ResizeHandle::Left | ResizeHandle::Right) => CursorIcon::EwResize,
-            Some(ResizeHandle::Top | ResizeHandle::Bottom) => CursorIcon::NsResize,
-            Some(ResizeHandle::TopLeft | ResizeHandle::BottomRight) => CursorIcon::NwseResize,
-            Some(ResizeHandle::TopRight | ResizeHandle::BottomLeft) => CursorIcon::NeswResize,
-            None => CursorIcon::Default,
-        };
-
-        if cursor != self.cursor {
-            window.set_cursor(cursor.into());
-            self.cursor = cursor;
+            winit_gui: WinitGui::new(),
         }
     }
 
@@ -156,7 +127,7 @@ impl ApplicationHandler for Application {
         self.window = Some(window);
     }
 
-    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
         match &event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
@@ -195,19 +166,29 @@ impl ApplicationHandler for Application {
             _ => {}
         }
 
-        // 窓が動いたら描き直す。常時回していないので、これが無いと
-        // 掴んで引いても絵が変わらない。
-        let touched = self
-            .scene
-            .as_mut()
-            .is_some_and(|scene| scene.window_event(&event));
+        // 指とキーは gui へ。指の形と IME もここで窓に映る。
+        let (Some(window), Some(scene)) = (self.window.as_ref(), self.scene.as_mut()) else {
+            return;
+        };
 
-        if touched {
-            self.request_redraw();
+        let response = self.winit_gui.window_event(
+            window.as_ref(),
+            &event,
+            &mut scene.window_frame,
+            &mut scene.draw_manager,
+            &scene.resources,
+        );
+
+        // 常時回していないので、gui の見た目が変わったら描き直しを頼む。
+        if response.redraw {
+            window.request_redraw();
         }
+    }
 
-        if let WindowEvent::PointerMoved { position, .. } = &event {
-            self.update_cursor(position.x as f32, position.y as f32);
+    // キャレットの点滅など、gui が時間で動くあいだは、その時刻に起きて描き直す。
+    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
+        if let (Some(window), Some(scene)) = (self.window.as_ref(), self.scene.as_ref()) {
+            self.winit_gui.about_to_wait(event_loop, window.as_ref(), &scene.window_frame);
         }
     }
 
@@ -390,12 +371,143 @@ impl Scene {
         );
         window_frame.add_window_item(
             Box::new(
+                InputText::new(
+                    "InputTextObject1".to_string(),
+                    "Type here...".to_string(),
+                    240.0,
+                    28.0,
+                    8.0,
+                    QuadType::Rounded { radius: 4.0 },
+                    Gap {
+                        x: 0.0,
+                        y: 5.0,
+                    },
+                    InputTextFont {
+                        base_font: font_handle,
+                        base_font_size: 14.0,
+                    },
+                    InputTextTheme {
+                        fill_color: ThemeColor {
+                            r: 0.06,
+                            g: 0.06,
+                            b: 0.07,
+                            a: 1.0,
+                        },
+                        outline_color: ThemeColor {
+                            r: 0.35,
+                            g: 0.35,
+                            b: 0.38,
+                            a: 1.0,
+                        },
+                        focus_outline_color: ThemeColor {
+                            r: 0.36,
+                            g: 0.56,
+                            b: 0.92,
+                            a: 1.0,
+                        },
+                        text_color: ThemeColor {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                        placeholder_color: ThemeColor {
+                            r: 0.5,
+                            g: 0.5,
+                            b: 0.52,
+                            a: 1.0,
+                        },
+                        caret_color: ThemeColor {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                        selection_color: ThemeColor {
+                            r: 0.24,
+                            g: 0.40,
+                            b: 0.72,
+                            a: 1.0,
+                        },
+                    }
+                )
+                .on_submit(|text| log::info!("submitted: {text}"))
+            )
+        );
+        window_frame.add_window_item(
+            Box::new(
+                InputText::new(
+                    "PasswordObject1".to_string(),
+                    "Password".to_string(),
+                    240.0,
+                    28.0,
+                    8.0,
+                    QuadType::Rounded { radius: 4.0 },
+                    Gap {
+                        x: 0.0,
+                        y: 5.0,
+                    },
+                    InputTextFont {
+                        base_font: font_handle,
+                        base_font_size: 14.0,
+                    },
+                    InputTextTheme {
+                        fill_color: ThemeColor {
+                            r: 0.06,
+                            g: 0.06,
+                            b: 0.07,
+                            a: 1.0,
+                        },
+                        outline_color: ThemeColor {
+                            r: 0.35,
+                            g: 0.35,
+                            b: 0.38,
+                            a: 1.0,
+                        },
+                        focus_outline_color: ThemeColor {
+                            r: 0.36,
+                            g: 0.56,
+                            b: 0.92,
+                            a: 1.0,
+                        },
+                        text_color: ThemeColor {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                        placeholder_color: ThemeColor {
+                            r: 0.5,
+                            g: 0.5,
+                            b: 0.52,
+                            a: 1.0,
+                        },
+                        caret_color: ThemeColor {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                        selection_color: ThemeColor {
+                            r: 0.24,
+                            g: 0.40,
+                            b: 0.72,
+                            a: 1.0,
+                        },
+                    }
+                )
+                .password()
+                .on_submit(|text| log::info!("password submitted ({} characters)", text.chars().count()))
+            )
+        );
+        window_frame.add_window_item(
+            Box::new(
                 ImageLabel::new(
                     "ImageLabelObject1".to_string(),
                     image_width as f32,
                     image_height as f32,
                     Quad {
-                        quad_type: QuadType::Normal,
+                        quad_type: QuadType::Rounded { radius: 6.0 },
                         x: 0.0,
                         y: 0.0,
                         width: 1.0,
@@ -403,7 +515,7 @@ impl Scene {
                     },
                     Gap {
                         x: 0.0,
-                        y: 0.0,
+                        y: 5.0,
                     },
                     ImageLabelTheme {
                         texture_color: ThemeColor {
@@ -419,6 +531,110 @@ impl Scene {
                 )
             )
         );
+        // 右クリックのメニュー。足さなければ、英語のいつものもの（ContextMenuLabels::text_input）になる。
+        // 1 つの項目に要るもの（字・右の列・選べる条件・押したときにすること・右に開くメニュー）は、
+        // すべてその項目に書く。
+        let slicer = ContextMenuSlicer {
+            color: ThemeColor {
+                r: 0.32,
+                g: 0.33,
+                b: 0.36,
+                a: 1.0,
+            },
+        };
+
+        let mut case_menu = ContextMenuLabels::new("CaseMenu");
+        case_menu
+            .add_context_menu_item(
+                ContextMenuLabel::new("大文字に")
+                    .enabled(|state| state.has_selection && state.editable)
+                    .on_event(|event| {
+                        if let Some(text) = event.selected_text() {
+                            event.replace_selection(&text.to_uppercase());
+                        }
+                    }),
+            )
+            .add_context_menu_item(
+                ContextMenuLabel::new("小文字に")
+                    .enabled(|state| state.has_selection && state.editable)
+                    .on_event(|event| {
+                        if let Some(text) = event.selected_text() {
+                            event.replace_selection(&text.to_lowercase());
+                        }
+                    }),
+            );
+
+        let mut input_text_menu = ContextMenuLabels::new(INPUT_TEXT_CONTEXT_MENU);
+        input_text_menu
+            .add_context_menu_item(ContextMenuLabel::cut("切り取り"))
+            .add_context_menu_item(ContextMenuLabel::copy("コピー"))
+            .add_context_menu_item(ContextMenuLabel::paste("貼り付け"))
+            .add_context_menu_item(slicer)
+            .add_context_menu_item(ContextMenuLabel::select_all("すべて選択"))
+            .add_context_menu_item(slicer)
+            .add_context_menu_item(
+                // 選んでいないときは消す（薄くするのが既定）。
+                ContextMenuLabel::new("大文字・小文字")
+                    .sub_menu(case_menu)
+                    .enabled(|state| state.has_selection && state.editable)
+                    .hide_when_disabled(),
+            );
+        window_frame.add_context_menu_labels(input_text_menu);
+        // 右クリックのメニューの見た目。決めなければ窓のテーマから作る。
+        window_frame.set_context_menu_style(ContextMenuStyle {
+            font: ContextMenuFont {
+                base_font: font_handle,
+                base_font_size: 13.0,
+            },
+            theme: ContextMenuTheme {
+                fill_color: ThemeColor {
+                    r: 0.16,
+                    g: 0.17,
+                    b: 0.19,
+                    a: 1.0,
+                },
+                outline_color: ThemeColor {
+                    r: 0.32,
+                    g: 0.33,
+                    b: 0.36,
+                    a: 1.0,
+                },
+                text_color: ThemeColor {
+                    r: 0.95,
+                    g: 0.95,
+                    b: 0.95,
+                    a: 1.0,
+                },
+                sub_title_color: ThemeColor {
+                    r: 0.62,
+                    g: 0.63,
+                    b: 0.66,
+                    a: 1.0,
+                },
+                highlight_color: ThemeColor {
+                    r: 0.24,
+                    g: 0.40,
+                    b: 0.72,
+                    a: 1.0,
+                },
+                shadow_color: ThemeColor {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                },
+                disabled_alpha: 0.35,
+            },
+            layout: ContextMenuLayout {
+                quad_type: QuadType::Rounded { radius: 6.0 },
+                padding: [14.0, 4.0],
+                item_height: Some(26.0),
+                highlight_inset: 4.0,
+                highlight_radius: 4.0,
+                shadow_offset: Some([0.0, 0.0]),
+                ..ContextMenuLayout::default()
+            },
+        });
         window_frame.create_object(
             &mut draw_manager,
             &resources,
@@ -432,60 +648,6 @@ impl Scene {
             window_frame,
             scale_factor,
         })
-    }
-
-    /// 指の入力を窓へ渡す。**窓が受け取ったら `true`。**
-    ///
-    /// 位置はサーフェスの画素なので、そのまま渡せます。
-    /// 図形ごとの座標へ戻すのは窓の側の仕事です
-    /// （カメラが図形ごとに違うので、呼ぶ側では決められません）。
-    fn window_event(&mut self, event: &WindowEvent) -> bool {
-        match event {
-            WindowEvent::PointerButton {
-                state,
-                position,
-                button,
-                ..
-            } => match (button, state) {
-                (ButtonSource::Mouse(MouseButton::Left), ElementState::Pressed) => {
-                    self.window_frame.mouse_left_pressed(
-                        &mut self.draw_manager,
-                        position.x as f32,
-                        position.y as f32,
-                    )
-                }
-
-                (ButtonSource::Mouse(MouseButton::Left), ElementState::Released) => {
-                    self.window_frame.mouse_left_released(
-                        &mut self.draw_manager,
-                        position.x as f32,
-                        position.y as f32,
-                    )
-                }
-
-                (ButtonSource::Mouse(MouseButton::Right), ElementState::Pressed) => {
-                    self.window_frame.mouse_right_pressed(
-                        &self.draw_manager,
-                        position.x as f32,
-                        position.y as f32,
-                    )
-                }
-
-                (ButtonSource::Mouse(MouseButton::Right), ElementState::Released) => {
-                    self.window_frame.mouse_right_released()
-                }
-
-                _ => false,
-            },
-
-            WindowEvent::PointerMoved { position, .. } => self.window_frame.mouse_moved(
-                &mut self.draw_manager,
-                position.x as f32,
-                position.y as f32,
-            ),
-
-            _ => false,
-        }
     }
 
     fn resize(&mut self, surface_size: SurfaceSize) {

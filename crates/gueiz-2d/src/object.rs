@@ -31,6 +31,9 @@ pub fn create_object(name: &str) -> Object {
     Object::new(name)
 }
 
+/// どこも含まない外接矩形。点を 1 つ広げると、その点だけの矩形になる。
+const EMPTY_BOUNDS: [f32; 4] = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+
 /// 描く図形。
 ///
 /// [`Object::begin`] から [`Object::end`] までに積んだ頂点が形になり、
@@ -45,6 +48,9 @@ pub struct Object {
     contour_starts: Vec<usize>,
     /// 三角形に開いた結果。[`crate::draw_manager::DrawManager`] が読む。
     triangles: Vec<Vertex>,
+    /// `triangles` の外接矩形 `[左, 上, 右, 下]`。当たり判定で、三角形を見る前に外を弾く。
+    /// 三角形が無ければ、どこも含まない向き（左 > 右）。
+    triangle_bounds: [f32; 4],
     recording: bool,
     /// 形が変わったので積み直しが要る。
     geometry_dirty: bool,
@@ -83,6 +89,7 @@ impl Object {
             outline: Vec::new(),
             contour_starts: vec![0],
             triangles: Vec::new(),
+            triangle_bounds: EMPTY_BOUNDS,
             recording: false,
             geometry_dirty: true,
             instances_dirty: true,
@@ -790,6 +797,13 @@ impl Object {
     /// assert!(!square.contains(-1.0, 5.0));
     /// ```
     pub fn contains(&self, x: f32, y: f32) -> bool {
+        // 外接矩形の外なら、三角形を 1 つずつ見るまでもない。
+        // 字の形のように三角形の多い図形が並んでいても、指の下に無いものはここで済む。
+        let [left, top, right, bottom] = self.triangle_bounds;
+        if x < left || x > right || y < top || y > bottom {
+            return false;
+        }
+
         tessellate::contains(&self.triangles, x, y)
     }
 
@@ -938,6 +952,9 @@ impl Object {
             self.apply_shape_block(block);
         }
 
+        self.triangle_bounds = self.triangles.iter().fold(EMPTY_BOUNDS, |[left, top, right, bottom], vertex| {
+            [left.min(vertex.x), top.min(vertex.y), right.max(vertex.x), bottom.max(vertex.y)]
+        });
         self.geometry_dirty = true;
     }
 

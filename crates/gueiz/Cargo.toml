@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+arboard.workspace = true
 bytemuck.workspace = true
 env_logger.workspace = true
 gueiz-2d.workspace = true

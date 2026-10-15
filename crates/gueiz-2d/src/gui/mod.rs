@@ -3,3 +3,7 @@ pub mod window_item;
 pub mod label;
 pub mod image_label;
 pub mod button;
+pub mod input_text;
+pub mod text_edit;
+pub mod context_menu;
+pub mod clipboard;

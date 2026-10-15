@@ -3,7 +3,7 @@ use gueiz_gpu::vertex::Vertex;
 use crate::draw_manager::DrawManager;
 use crate::font::Font;
 use crate::gui::window_frame::{Gap, QuadType, ThemeColor};
-use crate::gui::window_item::{replace_outline, WindowItem, WindowItemArguments1, WindowItemArguments2};
+use crate::gui::window_item::{replace_outline, CursorShape, WindowItem, WindowItemArguments1, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
 use crate::objects::polygon_rounded::CornerType;
@@ -289,6 +289,10 @@ impl WindowItem for Button {
         }
 
         true
+    }
+
+    fn cursor_shape(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<CursorShape> {
+        self.hit(draw_manager, x, y).then_some(CursorShape::Pointer)
     }
 
     fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {

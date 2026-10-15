@@ -42,6 +42,7 @@
 //! | 平面の図形・文字・UI | [`two_d`] |
 //! | 立体のメッシュ | [`three_d`] |
 //! | 窓を開く | [`window`] |
+//! | winit と gui をつなぐ | [`winit_gui`] |
 //! | 上の 2 つに共通の土台 | [`gpu`] |
 //!
 //! [`two_d`] と [`three_d`] は [`gpu`] の中身をそのまま再輸出しているので、
@@ -70,5 +71,8 @@ pub use gueiz_2d::gueiz_gpu as gpu;
 
 /// 窓を開く。winit の薄い包み。
 pub use gueiz_window as window;
+
+/// winit の出来事を gui（[`two_d::gui`]）へ渡し、指の形と IME を窓に映す。
+pub mod winit_gui;
 
 pub use wgpu;

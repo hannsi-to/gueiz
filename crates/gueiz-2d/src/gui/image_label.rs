@@ -1,14 +1,24 @@
 use gueiz_gpu::vertex::Vertex;
 use crate::draw_manager::DrawManager;
-use crate::gui::window_frame::{Gap, Quad, ThemeColor};
+use crate::gui::window_frame::{Gap, Quad, QuadType, ThemeColor};
 use crate::gui::window_item::{replace_outline, WindowItem, WindowItemArguments1, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
+use crate::objects::polygon_rounded::CornerType;
 use crate::objects::rect::Rect;
+use crate::objects::rect_rounded::RectRounded;
 use crate::paint_type::PaintType;
 use crate::resource::TextureHandle;
 use crate::text::TextLayoutData;
 
+/// 絵を貼った四角。
+///
+/// `uv` は貼る範囲と形です。
+///
+/// - `x` / `y` / `width` / `height`: 絵のどこを貼るか（`0..1`、左上と幅・高さ）。
+///   `0, 0, 1, 1` で絵の全体。
+/// - `quad_type`: 四角の形。[`QuadType::Rounded`] なら角を丸めます（半径は描く大きさの単位）。
+///   絵は四角いっぱいに貼られ、丸めた角の外だけが欠けます。
 pub struct ImageLabel {
     width: f32,
     height: f32,
@@ -49,24 +59,46 @@ impl ImageLabel {
     /// 絵の四角を組む。テクスチャは貼りません（組み直しでは頂点しか使わないので）。
     ///
     /// 組み直しで頂点だけが欲しいときは、名前に `""` を渡せば名前の確保が起きません。
+    ///
+    /// 頂点に UV は入れません。シェーダが図形の外接矩形から UV を作るので、
+    /// 角を丸めても絵は四角いっぱいに貼られます。どこを貼るかは
+    /// [`ImageLabel::texture_region`] で決めます。
     fn build_rect(&self, name: &str, item_x: f32, item_y: f32) -> Object {
         let color = &self.image_label_theme.texture_color;
         let left = item_x + self.gap.x;
         let top = item_y + self.gap.y;
+        let vertex = |x: f32, y: f32| Vertex::new_position_color(x, y, 0.0, color.r, color.g, color.b, color.a);
 
-        Rect::new(name)
-            .paint_type(PaintType::Fill)
-            .from(Vertex::new_position_color_uv(
-                left, top, 0.0,
-                color.r, color.g, color.b, color.a,
-                self.uv.x, self.uv.y,
-            ))
-            .to(Vertex::new_position_color_uv(
-                left + self.width, top + self.height, 0.0,
-                color.r, color.g, color.b, color.a,
-                self.uv.width, self.uv.height,
-            ))
-            .end()
+        match self.uv.quad_type {
+            QuadType::Normal => {
+                Rect::new(name)
+                    .paint_type(PaintType::Fill)
+                    .from(vertex(left, top))
+                    .to(vertex(left + self.width, top + self.height))
+                    .end()
+            }
+            QuadType::Rounded { radius } => {
+                RectRounded::new(name)
+                    .paint_type(PaintType::Fill)
+                    .from(CornerType::Circle { radius }, vertex(left, top))
+                    .to(vertex(left + self.width, top + self.height))
+                    .end()
+            }
+        }
+    }
+
+    /// アトラスの中の、貼る範囲（`[u, v, 幅, 高さ]`）。
+    ///
+    /// `uv` は絵 1 枚を `0..1` とした範囲なので、アトラスの中のその絵の範囲に写します。
+    fn texture_region(&self, whole: [f32; 4]) -> [f32; 4] {
+        let [u, v, width, height] = whole;
+
+        [
+            u + self.uv.x * width,
+            v + self.uv.y * height,
+            self.uv.width * width,
+            self.uv.height * height,
+        ]
     }
 
     fn relayout_data(&mut self, window_item_arguments: WindowItemArguments2) -> (f32, f32) {
@@ -97,7 +129,7 @@ impl WindowItem for ImageLabel {
 
         match window_item_arguments.resources.texture(self.image_label_texture.texture_handle) {
             Some(texture) => {
-                object.sprite_texture(texture);
+                object.sprite_region(texture.page, self.texture_region(texture.uv_rect));
             }
             None => log::warn!("the texture of '{}' is not committed; it is drawn without one", object.name()),
         }
