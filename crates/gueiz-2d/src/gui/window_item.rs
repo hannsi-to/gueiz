@@ -1,7 +1,20 @@
 use gueiz_gpu::camera::ScaleMode;
 use gueiz_gpu::renderer::SurfaceSize;
 use crate::draw_manager::DrawManager;
+use crate::object::Object;
 use crate::resource::Resources;
+
+/// 組み直した形の頂点を、登録済みの図形に入れ直す。
+///
+/// 図形を登録し直すと [`DrawManager`] に名前が溜まるので、頂点だけを差し替えます。
+/// カメラ・複製・ずらし・効果は `object` に残ったままです。
+pub(crate) fn replace_outline(object: &mut Object, built: &Object) {
+    object.begin(built.paint_type());
+    for vertex in built.vertices() {
+        object.put_vertex(*vertex);
+    }
+    object.end();
+}
 
 pub struct WindowItemArguments1<'a> {
     pub draw_manager: &'a mut DrawManager,
@@ -69,30 +82,38 @@ pub trait WindowItem {
     /// （[`TextRenderer::shape_ids`](crate::text::TextRenderer::shape_ids)）も入れてください。
     ///
     /// ここに無い図形は、窓を動かしても付いてきません。
-    fn object_names(&self) -> Vec<String>;
+    fn object_names(&self, draw_manager: &mut DrawManager) -> Vec<String>;
 
     /// 描き先の大きさが変わった。カメラは窓が貼り直すので、それ以外にすることがあれば。
     fn resize(&mut self, draw_manager: &mut DrawManager, surface_size: SurfaceSize, design: [f32; 2]) {
 
     }
 
-    fn mouse_left_pressed(&mut self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
+    /// 左を押した。窓の中で、手前がこの窓のときだけ届きます。**取ったら `true`。**
+    ///
+    /// 取ったら、後ろの部品にも窓の帯にも渡りません。
+    /// 見た目を変えるなら、ここで図形を書き換えて構いません。
+    fn mouse_left_pressed(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
         false
     }
 
-    fn mouse_right_pressed(&mut self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
+    fn mouse_right_pressed(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
         false
     }
 
-    fn mouse_left_released(&mut self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
+    /// 左を放した。**どこで放しても、すべての部品に届きます**（押したまま外へ出たのを戻せるように）。
+    /// 何か変わったら `true`。
+    fn mouse_left_released(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
         false
     }
 
-    fn mouse_right_released(&mut self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
+    fn mouse_right_released(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
         false
     }
 
-    fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+    /// 指が動いた。窓を掴んでいる・縁を引いているあいだは届きません。
+    /// 見た目が変わったら `true`（呼ぶ側が描き直します）。
+    fn mouse_moved(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
         false
     }
 }

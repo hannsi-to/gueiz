@@ -1,53 +1,192 @@
-use std::os::unix::raw::off_t;
+use std::hash::Hash;
+use std::panic::panic_any;
+use std::sync::Arc;
+use log::info;
+use wgpu::Color;
+use wgpu::naga::CooperativeRole::C;
+use wgpu::naga::SwizzleComponent::W;
+use wgpu::wgc::binding_model::GetBindGroupLayoutError;
+use wgpu::wgc::impl_parent_device;
 use gueiz_gpu::camera::ScaleMode;
-use gueiz_gpu::renderer::{FrameOutcome, SurfaceSize};
+use gueiz_gpu::renderer::SurfaceSize;
 use gueiz_gpu::vertex::Vertex;
-use crate::draw_manager::DrawManager;
 use crate::effect::Block;
-use crate::gui::window_item::WindowItemArguments2;
+use crate::draw_manager::DrawManager;
+use crate::gui::window_item::{replace_outline, WindowItemArguments1, WindowItem, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
+use crate::resource::{FontHandle, Resources};
 use crate::objects::lines::{CurveRepresentationType, Lines};
 use crate::objects::polygon_rounded::CornerType;
 use crate::objects::rect::Rect;
 use crate::objects::rect_rounded::RectRounded;
 use crate::paint_type::{JointType, PaintType};
-use crate::resource::{FontHandle, Resources};
 use crate::text::{measure, TextAlign, TextArea, TextLayoutData, TextLocation, TextRenderer, TextStyle};
 
 const LINE_WIDTH: f32 = 1.0;
+
+/// 縮められる幅の下限。題名を測れなかったとき（書体が無い・題名が空）に使います。
+///
+/// 測れたときは [`WindowFrame::min_width`] が題名の幅から決めます。
+pub const MIN_WIDTH: f32 = 120.0;
+/// 縁の**外側**で、大きさを変える取っ手になる幅。
 const HANDLE_OUTSIDE: f32 = 6.0;
+/// 縁の**内側**で、取っ手になる幅。広くすると、帯の端で掴みにくくなる。
 const HANDLE_INSIDE: f32 = 3.0;
 
 pub struct WindowFrame {
+    scale_mode: ScaleMode,
     title: String,
-    text_size: f32,
     frame_quad: Quad,
     title_bar_height: f32,
     gap: Gap,
-    window_theme: WindowTheme,
     window_font: WindowFont,
-    scale_mode: ScaleMode,
+    window_theme: WindowTheme,
     register_name: RegisterName,
-    min_width: f32,
+    /// 頂点を組んだときの左上。**動かしても変わりません。**
+    ///
+    /// 動かすのに頂点を組み直すと、図形を登録し直すことになります
+    /// （[`DrawManager`] に消す手立てが無いので名前が溜まります）。
+    /// 代わりに [`Object::translate`] でずらすので、「どこから」ずらすのかを
+    /// 覚えておく必要があります。
     built_origin: [f32; 2],
+    /// 掴んでいるあいだだけ。
     drag: Option<Drag>,
+    /// 縁を引いているあいだだけ。
     resize: Option<Resize>,
-    pending: Pending,
+    hidden: bool,
+    window_items: Vec<Box<dyn WindowItem>>,
+    /// 部品の図形に最後に積んだ、窓の外を削る山。積み直すときに、これを探して差し替える。
+    ///
+    /// 枠は角丸の四角なので、覆いを焼かずに式（[`Block::ClipRect`] と
+    /// [`Block::ClipHalfPlane`]）で削ります。大きさや置き場所が変わっても、
+    /// 数を差し替えるだけで済みます。
     applied_clip: Option<[Block; 2]>,
+    /// この窓の図形の名前。枠の形・題名の字・部品の順。
+    ///
+    /// 動かすたびに集め直すと、そのたびに名前を複製することになるので覚えておきます。
+    /// 字の形が増えるのは [`WindowFrame::create_object`] と組み直しのときだけなので、
+    /// そこで [`WindowFrame::refresh_owned_names`] から作り直します。
+    owned_names: Vec<String>,
+    /// `owned_names` のうち、部品の図形が始まる位置。覆いを積むのはここから後ろ。
+    item_names_start: usize,
+    /// 名前を集め直したので、覆いが前と同じでも積み直す必要がある。
+    clip_stale: bool,
+    /// 指で動かした・大きさを変えたぶんのうち、まだ図形に移していないもの。
+    /// [`WindowFrame::update`] でまとめて移す。
+    pending: Pending,
+    /// 縮められる幅の下限。[`WindowFrame::create_object`] で題名を測って決める。
+    min_width: f32,
+    /// 題名を最後に置いたときの窓の幅。まだ置いていなければ `None`。
+    ///
+    /// 題名の置き方で変わるのは幅だけなので、幅が同じなら置き直しを飛ばします
+    /// （下の縁だけを引いたときなど）。
+    title_layout_width: Option<f32>,
+}
+
+/// 図形に移し待ちの変更。
+///
+/// 指の動きは 1 フレームに何度も届くことがあります。届くたびに組み直すと、
+/// 描かれない途中の形まで組むことになるので、印だけ付けておいて
+/// [`WindowFrame::update`] で 1 回にまとめます。
+#[derive(Default, Clone, Copy)]
+struct Pending {
+    /// 大きさが変わった。形・題名・部品を組み直す（ずらしも含む）。
+    rebuild: bool,
+    /// 置き場所だけが変わった。ずらしを掛け直す。
+    offset: bool,
+}
+
+/// 掴んでいるあいだの覚え。
+struct Drag {
+    /// 掴んだ場所の、**窓の左上からのずれ**。
+    ///
+    /// 動いた量を足していくのではなくこれを覚えるのは、取りこぼしても
+    /// ずれが溜まらないからです。指のどこを掴んだかは変わらないので、
+    /// 「いまの位置 - このずれ」がいつでも正しい置き場所になります。
+    grab: [f32; 2],
+}
+
+/// 縁を引いているあいだの覚え。
+struct Resize {
+    handle: ResizeHandle,
+    /// 掴んだときの窓。**いまの窓からではなく、ここからの差で決める。**
+    /// 下限で止めたぶんが溜まらないので、戻せば元の大きさに戻る。
+    start_quad: Quad,
+    /// 掴んだ場所。
+    start: [f32; 2],
+}
+
+/// 大きさを変える取っ手。縁と角。
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum ResizeHandle {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl ResizeHandle {
+    fn moves_left(self) -> bool {
+        matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
+    }
+
+    fn moves_right(self) -> bool {
+        matches!(self, Self::Right | Self::TopRight | Self::BottomRight)
+    }
+
+    fn moves_top(self) -> bool {
+        matches!(self, Self::Top | Self::TopLeft | Self::TopRight)
+    }
+
+    fn moves_bottom(self) -> bool {
+        matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
+    }
+}
+
+struct RegisterName {
+    pub frame: Option<String>,
+    pub title_bar: Option<String>,
+    pub frame_outline: Option<String>,
+    pub title_bar_slice_line: Option<String>,
+    pub text_title: Option<String>,
+}
+
+pub struct WindowTheme {
+    pub frame_fill_color: ThemeColor,
+    pub frame_outline_color: ThemeColor,
+    pub title_bar_fill_color: ThemeColor,
+    pub title_bar_slice_line_color: ThemeColor,
+    pub text_title_color: ThemeColor,
+}
+
+pub struct WindowFont {
+    /// 題名に使う書体。中身は呼ぶ側の [`Resources`] が持つ。
+    pub base_font: FontHandle,
+    pub base_font_size: f32,
+}
+
+pub struct ThemeColor {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
 }
 
 impl WindowFrame {
-    pub fn new(register_name_string: String, title: String, text_size: f32, frame_quad: Quad, title_bar_height: f32, gap: Gap, window_theme: WindowTheme, window_font: WindowFont, scale_mode: ScaleMode) -> Self {
+    pub fn new(register_name_string: String,scale_mode: ScaleMode,title: String, frame_quad: Quad, title_bar_height: f32, gap: Gap, window_font: WindowFont, window_theme: WindowTheme) -> Self {
         Self {
+            scale_mode,
             title,
-            text_size,
             frame_quad,
             title_bar_height,
             gap,
-            window_theme,
             window_font,
-            scale_mode,
+            window_theme,
             register_name: RegisterName {
                 frame: Some(register_name_string),
                 title_bar: None,
@@ -55,18 +194,31 @@ impl WindowFrame {
                 title_bar_slice_line: None,
                 text_title: None,
             },
-            min_width: 120.0,
-            built_origin: [0.0, 0.0],
+            built_origin: [0.0; 2],
             drag: None,
             resize: None,
-            pending: Pending::default(),
+            hidden: false,
+            window_items: Vec::new(),
             applied_clip: None,
+            owned_names: Vec::new(),
+            item_names_start: 0,
+            clip_stale: true,
+            pending: Pending::default(),
+            min_width: MIN_WIDTH,
+            title_layout_width: None,
         }
     }
 
+    pub fn add_window_item(&mut self, window_item: Box<dyn WindowItem>) {
+        self.window_items.push(window_item);
+    }
+
     pub fn create_object(&mut self, draw_manager: &mut DrawManager, resources: &Resources, surface_size: SurfaceSize, design: [f32; 2]) {
+        // 題名が収まる幅より狭くはしない。形を組む前に決める。
         self.min_width = self.measure_min_width(resources);
         self.frame_quad.width = self.frame_quad.width.max(self.min_width);
+
+        // ずらす量はここからの差で出す。
         self.built_origin = [self.frame_quad.x, self.frame_quad.y];
 
         let register_name_frame = self.register_name.frame.as_ref().unwrap();
@@ -75,167 +227,124 @@ impl WindowFrame {
         self.register_name.title_bar_slice_line = Some(format!("{register_name_frame}-title_bar_slice_line"));
         self.register_name.text_title = Some(format!("{register_name_frame}-text_title"));
 
-        let objects = self.build_shapes();
-        for mut object in objects {
-            object.camera_for(surface_size, design, self.scale_mode);
+        let scale_mode = self.scale_mode;
+        let objects = self.build_shapes(self.shape_names().map(Option::unwrap_or_default));
+        // 名前が重なると DrawManager が後ろに数を足すので、返ってきた名前を覚える。
+        let [frame, title_bar, frame_outline, title_bar_slice_line] = objects.map(|mut object| {
+            object.camera_for(surface_size, design, scale_mode);
             object.instance(create_instance());
-            draw_manager.register(object);
-        }
+            draw_manager.register(object)
+        });
+        self.register_name.frame = Some(frame);
+        self.register_name.title_bar = Some(title_bar);
+        self.register_name.frame_outline = Some(frame_outline);
+        self.register_name.title_bar_slice_line = Some(title_bar_slice_line);
 
-        let name = |name: &Option<String>| name.clone().unwrap_or_default();
-        let mut text_title = TextRenderer::new(&name(&self.register_name.text_title));
+        let mut text_title = TextRenderer::new(self.register_name.text_title.as_deref().unwrap_or_default());
         text_title.camera_for(surface_size, design, self.scale_mode);
         text_title.color(self.window_theme.text_title_color.r,self.window_theme.text_title_color.g,self.window_theme.text_title_color.b,self.window_theme.text_title_color.a);
-        text_title.text_layout_data(self.text_title_layout_data());
-        if self.title.is_empty() {
-            return;
+        text_title.text_layout_data(self.title_layout_data());
+        // 題名が置けなくても、部品は組む。
+        match resources.font(self.window_font.base_font) {
+            Some(font) => match text_title.register_draw_manager(draw_manager, &font) {
+                Ok(_) => self.title_layout_width = Some(self.frame_quad.width),
+                Err(error) => log::warn!("failed to lay out the title: {error}"),
+            },
+            None => log::warn!("the title font is not in the resources; the title is not drawn"),
         }
-        let Some(font) = resources.font(self.window_font.base_font) else {
-            log::warn!("the title font is not in the resources; the title is not drawn");
-            return;
-        };
-
-        text_title.register_draw_manager(draw_manager, &font).expect("Failed to register draw manager");
-        draw_manager.add_text_renderer(text_title);
-    }
-
-    pub fn update(&mut self, draw_manager: &mut DrawManager, resources: &Resources) -> bool {
-        let pending = std::mem::take(&mut self.pending);
-
-        if pending.rebuild {
-            self.rebuild_all(draw_manager, resources);
-        } else if pending.offset {
-            self.apply_offset(draw_manager)
+        // 置けなかったときも預けておく。組み直しで幅が変われば、もう一度置いてみる。
+        if let Some(replaced) = draw_manager.add_text_renderer(text_title) {
+            log::warn!("the text renderer '{}' was already registered; it is replaced", replaced.name());
         }
 
-        pending.rebuild || pending.offset
-    }
-
-    fn rebuild_all(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
-        self.rebuild_shapes(draw_manager);
-        self.relayout_title(draw_manager, resources);
-        self.rebuild_items(draw_manager, resources);
-
-        self.apply_offset(draw_manager);
-    }
-
-    fn rebuild_items(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
-        // let [item_x, mut item_y] = self.item_origin();
-        // let width = self.item_width();
-        // let mut counter = 0;
-        // for window_item in &mut self.window_items {
-        //     let item_size = window_item.rebuild(
-        //         WindowItemArguments2 {
-        //             draw_manager,
-        //             resources: &resources,
-        //             register_name: &self.register_name.frame.as_ref().unwrap(),
-        //             counter,
-        //             item_x,
-        //             item_y,
-        //             width,
-        //             scale_mode: self.scale_mode,
-        //         }
-        //     );
-        //     item_y += item_size.1;
-        //     counter += 1;
-        // }
-    }
-
-    fn relayout_title(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
-        let layout_data = self.text_title_layout_data();
-
-        if let Some(font) = resources.font(self.window_font.base_font) {
-            draw_manager.with_text_renderer(self.register_name.frame.as_ref().unwrap(), |text_title, draw_manager| {
-                text_title.clear(draw_manager);
-                text_title.text_layout_data(layout_data);
-
-                if let Err(error) = text_title.register_draw_manager(draw_manager, &font) {
-                    log::warn!("failed to lay out the title again: {error}");
+        let [item_x, mut item_y] = self.item_origin();
+        let width = self.item_width();
+        let mut counter = 0;
+        for window_item in &mut self.window_items {
+            let item_size = window_item.create_object(
+                WindowItemArguments1 {
+                    draw_manager,
+                    resources: &resources,
+                    register_name: self.register_name.frame.as_ref().unwrap(),
+                    counter,
+                    item_x,
+                    item_y,
+                    width,
+                    surface_size,
+                    scale_mode: self.scale_mode,
+                    design
                 }
-            });
-        }
-    }
-
-    fn rebuild_shapes(&mut self, draw_manager: &mut DrawManager) {
-        let names = [
-            self.register_name.frame.as_ref(),
-            self.register_name.title_bar.as_ref(),
-            self.register_name.frame_outline.as_ref(),
-            self.register_name.title_bar_slice_line.as_ref(),
-        ];
-
-        for (name, built) in names.into_iter().zip(self.build_shapes()) {
-            let Some(object) = name.and_then(|name| draw_manager.object_mut(name)) else {
-                continue;
-            };
-
-            object.begin(built.paint_type());
-            for vertex in built.vertices() {
-                object.put_vertex(*vertex);
-            }
-            object.end();
-        }
-    }
-
-    fn apply_offset(&mut self, draw_manager: &mut DrawManager) {
-        let x = self.frame_quad.x - self.built_origin[0];
-        let y = self.frame_quad.y - self.built_origin[1];
-
-        for name in self.object_names(draw_manager) {
-            if let Some(object) = draw_manager.object_mut(&name) {
-                object.translate(x, y, 0.0);
-            }
+            );
+            item_y += item_size.1;
+            counter += 1;
         }
 
+        // 部品の図形は、ここまでで全部登録されている。
+        self.refresh_owned_names(draw_manager);
         self.apply_clip(draw_manager);
     }
 
-    fn apply_clip(&mut self, draw_manager: &mut DrawManager) {
-        let blocks = self.clip_blocks();
-        let applied = self.applied_clip;
+    // --- 部品 ---
 
-        // for window_item in &self.window_items {
-        //     for name in window_item.object_names() {
-        //         let Some(object) = draw_manager.object_mut(&name) else {
-        //             continue;
-        //         };
-        //
-        //         for (index, block) in blocks.into_iter().enumerate() {
-        //             let old = applied.map(|applied| applied[index]);
-        //             object.replace_effect(|effect| Some(*effect) == old, block);
-        //         }
-        //     }
-        // }
+    /// 1 つ目の部品を置く左上。帯のすぐ下で、余白ぶん内側。
+    ///
+    /// 形と同じく、**組んだときの左上（`built_origin`）が基準**です。
+    /// 置き場所のずれは、部品の図形にも [`Object::translate`] で掛けます。
+    fn item_origin(&self) -> [f32; 2] {
+        let [x, y] = self.built_origin;
 
-        self.applied_clip = Some(blocks);
+        [x + self.gap.x, y + self.title_bar_height + self.gap.y]
     }
 
-    fn clip_blocks(&self) -> [Block; 2] {
-        let top = self.frame_quad.y + self.title_bar_height;
-
-        [
-            Block::ClipRect {
-                min: [self.frame_quad.x, self.frame_quad.y],
-                max: [self.frame_quad.x + self.frame_quad.width, self.frame_quad.y + self.frame_quad.height],
-                radius: self.frame_quad.quad_type.radius(),
-                softness: 0.0,
-                invert: false,
-            },
-            Block::ClipHalfPlane {
-                normal: [0.0, -1.0],
-                distance: -top,
-                softness: 0.0,
-                invert: false,
-            },
-        ]
+    /// 部品に使える幅。窓の幅から左右の余白を引いたもの。
+    fn item_width(&self) -> f32 {
+        self.frame_quad.width - self.gap.x * 2.0
     }
 
-    fn text_title_layout_data(&self) -> TextLayoutData {
+    /// いまの幅で部品を組み直す。上から順に、前の部品の高さぶん下へ積む。
+    fn rebuild_items(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
+        let [item_x, mut item_y] = self.item_origin();
+        let width = self.item_width();
+        let mut counter = 0;
+        for window_item in &mut self.window_items {
+            let item_size = window_item.rebuild(
+                WindowItemArguments2 {
+                    draw_manager,
+                    resources: &resources,
+                    register_name: &self.register_name.frame.as_ref().unwrap(),
+                    counter,
+                    item_x,
+                    item_y,
+                    width,
+                    scale_mode: self.scale_mode,
+                }
+            );
+            item_y += item_size.1;
+            counter += 1;
+        }
+    }
+
+    /// 窓の大きさが変わった。枠の形・題名・部品をすべて今の大きさで組み直す。
+    fn rebuild_all(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
+        self.rebuild_shapes(draw_manager);
+        self.relayout_title(draw_manager, resources);
+        self.rebuild_items(draw_manager, resources, );
+        self.refresh_owned_names(draw_manager);
+
+        // 組み直しで新しく出てきた図形（字の形など）には、まだずらしも覆いも掛かっていない。
+        self.apply_offset(draw_manager);
+    }
+
+    /// 題名をどこにどう置くか。
+    ///
+    /// 形と同じく、**組んだときの左上（`built_origin`）を基準に、いまの幅で**置きます。
+    /// 置き場所のずれは字の形にも [`Object::translate`] で掛かるので、ここには入れません。
+    fn title_layout_data(&self) -> TextLayoutData {
         let [x, y] = self.built_origin;
 
         TextLayoutData {
             text: self.title.clone(),
-            style: TextStyle::new(self.text_size),
+            style: TextStyle::new(self.window_font.base_font_size),
             text_location: TextLocation::Area {
                 area: TextArea::new(x + self.gap.x, y, self.frame_quad.width - (self.gap.x * 2.0), self.title_bar_height)
                     .vertical(TextAlign::Center),
@@ -243,20 +352,61 @@ impl WindowFrame {
         }
     }
 
-    fn build_shapes(&self) -> Vec<Object> {
+    /// いまの幅で題名を置き直す。
+    ///
+    /// 置いた字を消してから書き直すので、字は増えません。字の形は残っているので、
+    /// 同じ題名なら形の作り直しも起きません。書体を読めていなければ何もしません。
+    ///
+    /// 新しく出てきた字の形にずらしを掛けるのは、呼ぶ側（[`WindowFrame::rebuild_all`]）です。
+    ///
+    /// 前に置いたときと幅が同じなら、置き方も同じなので何もしません。
+    fn relayout_title(&mut self, draw_manager: &mut DrawManager, resources: &Resources) {
+        if self.title_layout_width == Some(self.frame_quad.width) {
+            return;
+        }
+
+        let layout_data = self.title_layout_data();
+
+        if let (Some(font), Some(name)) = (resources.font(self.window_font.base_font), self.register_name.text_title.as_ref()) {
+            let laid_out = draw_manager.with_text_renderer(name, |text_title, draw_manager| {
+                text_title.clear(draw_manager);
+                text_title.text_layout_data(layout_data);
+
+                match text_title.register_draw_manager(draw_manager, &font) {
+                    Ok(_) => true,
+                    Err(error) => {
+                        log::warn!("failed to lay out the title again: {error}");
+                        false
+                    }
+                }
+            });
+
+            if laid_out == Some(true) {
+                self.title_layout_width = Some(self.frame_quad.width);
+            }
+        }
+    }
+
+    /// 枠・帯・縁取り・区切り線の形を組む。
+    ///
+    /// **組んだときの左上（`built_origin`）に、いまの大きさで組みます。**
+    /// 置き場所のずれは [`Object::translate`] で持つので、ここには入れません。
+    /// 名前は `names` のものを使います。順番は [`WindowFrame::shape_names`] と同じです。
+    /// 組み直しで頂点だけが欲しいときは、名前に `""` を渡せば名前の確保が起きません。
+    fn build_shapes(&self, names: [&str; 4]) -> [Object; 4] {
         let [x, y] = self.built_origin;
         let width = self.frame_quad.width;
         let height = self.frame_quad.height;
         let theme = &self.window_theme;
+        let [frame_name, title_bar_name, frame_outline_name, title_bar_slice_line_name] = names;
 
-        let name = |name: &Option<String>| name.clone().unwrap_or_default();
         let vertex = |x: f32, y: f32, color: &ThemeColor| {
             Vertex::new_position_color(x, y, 0.0, color.r, color.g, color.b, color.a)
         };
 
         let frame = match self.frame_quad.quad_type {
             QuadType::Normal => {
-                Rect::new(&name(&self.register_name.frame))
+                Rect::new(frame_name)
                     .paint_type(PaintType::Fill)
                     .vertex1(vertex(x, y + self.title_bar_height, &theme.frame_fill_color))
                     .vertex2(vertex(x + width, y + self.title_bar_height, &theme.frame_fill_color))
@@ -265,7 +415,7 @@ impl WindowFrame {
                     .end()
             }
             QuadType::Rounded { radius } => {
-                RectRounded::new(&name(&self.register_name.frame))
+                RectRounded::new(frame_name)
                     .paint_type(PaintType::Fill)
                     .vertex1(CornerType::None {}, vertex(x, y + self.title_bar_height, &theme.frame_fill_color))
                     .vertex2(CornerType::None {}, vertex(x + width, y + self.title_bar_height, &theme.frame_fill_color))
@@ -277,7 +427,7 @@ impl WindowFrame {
 
         let title_bar = match self.frame_quad.quad_type {
             QuadType::Normal => {
-                Rect::new(&name(&self.register_name.title_bar))
+                Rect::new(title_bar_name)
                     .paint_type(PaintType::Fill)
                     .vertex1(vertex(x, y, &theme.title_bar_fill_color))
                     .vertex2(vertex(x + width, y, &theme.title_bar_fill_color))
@@ -286,7 +436,7 @@ impl WindowFrame {
                     .end()
             }
             QuadType::Rounded { radius} => {
-                RectRounded::new(&name(&self.register_name.title_bar))
+                RectRounded::new(title_bar_name)
                     .paint_type(PaintType::Fill)
                     .vertex1(CornerType::Circle {radius}, vertex(x, y, &theme.title_bar_fill_color))
                     .vertex2(CornerType::Circle {radius}, vertex(x + width, y, &theme.title_bar_fill_color))
@@ -298,14 +448,14 @@ impl WindowFrame {
 
         let frame_outline = match self.frame_quad.quad_type {
             QuadType::Normal => {
-                Rect::new(&name(&self.register_name.frame_outline))
+                Rect::new(frame_outline_name)
                     .paint_type(PaintType::Stroke {line_width: LINE_WIDTH, joint_type: JointType::None, strip: false, dash: None})
                     .from(vertex(x, y, &theme.frame_outline_color))
                     .to_wh(vertex(width, height, &theme.frame_outline_color))
                     .end()
             }
             QuadType::Rounded { radius } => {
-                RectRounded::new(&name(&self.register_name.frame_outline))
+                RectRounded::new(frame_outline_name)
                     .paint_type(PaintType::Stroke {line_width: LINE_WIDTH, joint_type: JointType::None, strip: false, dash: None})
                     .from(CornerType::Circle {radius},vertex(x, y, &theme.frame_outline_color))
                     .to_wh(vertex(width, height, &theme.frame_outline_color))
@@ -313,141 +463,39 @@ impl WindowFrame {
             }
         };
 
-        let title_bar_slice_line = Lines::new(&name(&self.register_name.title_bar_slice_line))
+        let title_bar_slice_line = Lines::new(title_bar_slice_line_name)
             .paint_type(PaintType::Stroke {line_width: LINE_WIDTH, joint_type: JointType::None, strip: false, dash: None})
             .curve_type(CurveRepresentationType::Normal)
             .point(vertex(x + self.gap.x, y + self.title_bar_height, &theme.title_bar_slice_line_color))
             .last_point(vertex(x - self.gap.x + width, y + self.title_bar_height, &theme.title_bar_slice_line_color))
             .end();
 
-        vec![frame, title_bar, frame_outline, title_bar_slice_line]
+        [frame, title_bar, frame_outline, title_bar_slice_line]
     }
 
-    pub fn measure_min_width(&self, resources: &Resources) -> f32 {
-        if self.title.is_empty() {
-            return self.min_width;
+    /// いまの大きさで形を組み直し、**登録済みの図形の中に**入れ直す。
+    ///
+    /// 登録し直すと [`DrawManager`] に名前が溜まるので、頂点だけを差し替えます。
+    /// カメラ・複製・ずらしは図形に残ったままです。
+    fn rebuild_shapes(&self, draw_manager: &mut DrawManager) {
+        // 頂点しか使わないので、名前は付けない。
+        for (name, built) in self.shape_names().into_iter().zip(self.build_shapes([""; 4])) {
+            let Some(object) = name.and_then(|name| draw_manager.object_mut(name)) else {
+                continue;
+            };
+
+            replace_outline(object, &built);
         }
-
-        let Some(font) = resources.font(self.window_font.base_font) else {
-            return self.min_width;
-        };
-
-        let size = measure(&font, &self.title, &TextStyle::new(self.text_size));
-        let title_width = size.width.max(size.ink.right);
-        let corner_size = self.frame_quad.quad_type.radius() * 2.0;
-
-        (title_width + self.gap.x * 2.0).max(corner_size)
     }
 
-    fn to_world(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<[f32; 2]> {
-        let name = self.register_name.title_bar.as_ref()?;
-        let object = draw_manager.object(name.as_str())?;
-
-        object.view_camera().screen_to_world(x, y)
-    }
-
-    pub fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        let Some(world) = self.to_world(draw_manager, x, y) else {
-            return false;
-        };
-
-        if let Some(handle) = self.resize_handle_at(draw_manager, x, y) {
-            self.resize = Some(Resize {
-                handle,
-                start_quad: self.frame_quad,
-                start: world,
-            });
-
-            return true;
-        }
-
-        if self.frame_quad.hover(x, y) {
-            self.drag = Some(Drag {
-                grab: [world[0] - self.frame_quad.x, world[1] - self.frame_quad.y],
-            })
-        }
-
-        true
-    }
-
-    pub fn mouse_left_released(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        let dragged = self.drag.take().is_some();
-        let resized = self.resize.take().is_some();
-
-        dragged || resized
-    }
-
-    pub fn mouse_right_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        false
-    }
-
-    pub fn mouse_right_released(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        false
-    }
-
-    pub fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        if self.resize.is_some() {
-            return self.resize_moved(draw_manager, x, y);
-        }
-
-        let Some(drag) = self.drag.as_ref() else {
-            return false;
-        };
-
-        let grab = drag.grab;
-
-        let Some(world) = self.to_world(draw_manager, x, y) else {
-            return false;
-        };
-
-        self.frame_quad.x = world[0] - grab[0];
-        self.frame_quad.y = world[1] - grab[1];
-
-        self.pending.offset = true;
-
-        true
-    }
-
-    pub fn resize_handle_at(&self, draw_manager: &mut DrawManager, x: f32, y: f32) -> Option<ResizeHandle> {
-        let [world_x, world_y] = self.to_world(draw_manager, x, y)?;
-
-        let quad = &self.frame_quad;
-        let (left, top) = (quad.x, quad.y);
-        let (right, bottom) = (quad.x + quad.width, quad.y + quad.height);
-
-        if world_x < left - HANDLE_OUTSIDE
-            || world_x > right + HANDLE_OUTSIDE
-            || world_y < top - HANDLE_OUTSIDE
-            || world_y > bottom + HANDLE_OUTSIDE
-        {
-            return None;
-        }
-
-        let near_left = world_x <= left + HANDLE_INSIDE;
-        let near_right = world_x >= right - HANDLE_INSIDE;
-        let near_top = world_y <= top + HANDLE_INSIDE;
-        let near_bottom = world_y >= bottom - HANDLE_INSIDE;
-
-        let handle = match (near_left, near_right, near_top, near_bottom) {
-            (true, _, true, _) => ResizeHandle::TopLeft,
-            (_, true, true, _) => ResizeHandle::TopRight,
-            (true, _, _, true) => ResizeHandle::BottomLeft,
-            (_, true, _, true) => ResizeHandle::BottomRight,
-            (true, _, _, _) => ResizeHandle::Left,
-            (_, true, _, _) => ResizeHandle::Right,
-            (_, _, true, _) => ResizeHandle::Top,
-            (_, _, _, true) => ResizeHandle::Bottom,
-            _ => return None,
-        };
-
-        if quad.hover(world_x, world_y) {
-            match draw_manager.pick(x, y) {
-                Some(pick) if self.owns(&pick.name,draw_manager) => {}
-                _ => return None,
-            }
-        }
-
-        Some(handle)
+    /// 枠・帯・縁取り・区切り線の名前。[`WindowFrame::build_shapes`] が返す順と同じ。
+    fn shape_names(&self) -> [Option<&str>; 4] {
+        [
+            self.register_name.frame.as_deref(),
+            self.register_name.title_bar.as_deref(),
+            self.register_name.frame_outline.as_deref(),
+            self.register_name.title_bar_slice_line.as_deref(),
+        ]
     }
 
     pub fn resize(&mut self, draw_manager: &mut DrawManager, surface_size: SurfaceSize, design: [f32; 2]) {
@@ -483,72 +531,205 @@ impl WindowFrame {
             });
         }
 
-        // for window_item in &mut self.window_items {
-        //     for name in window_item.object_names() {
-        //         if let Some(object) = draw_manager.object_mut(&name) {
-        //             object.camera_for(surface_size, design, self.scale_mode);
-        //         }
-        //     }
-        //
-        //     window_item.resize(draw_manager, surface_size, design);
-        // }
+        // 部品の図形のカメラも貼り直す。部品の側では要らない。
+        for window_item in &mut self.window_items {
+            for name in window_item.object_names(draw_manager) {
+                if let Some(object) = draw_manager.object_mut(&name) {
+                    object.camera_for(surface_size, design, self.scale_mode);
+                }
+            }
+
+            window_item.resize(draw_manager, surface_size, design);
+        }
     }
 
-    fn owns(&self, name: &str, draw_manager: &mut DrawManager) -> bool {
-        self.object_names(draw_manager).iter().any(|owned| owned == name)
+    // --- フレームごと ---
+
+    /// 指で動かした・大きさを変えたぶんを図形に移す。**描く前に 1 フレーム 1 回呼んでください。**
+    ///
+    /// [`WindowFrame::mouse_moved`] は窓の場所と大きさを覚えるだけで、図形には触りません。
+    /// 指の動きが 1 フレームに何度届いても、組み直しはここでの 1 回で済みます。
+    ///
+    /// 何か移したら `true`。
+    pub fn update(&mut self, draw_manager: &mut DrawManager, resources: &Resources) -> bool {
+        let pending = std::mem::take(&mut self.pending);
+
+        if pending.rebuild {
+            // ずらしの掛け直しも含む。
+            self.rebuild_all(draw_manager, resources);
+        } else if pending.offset {
+            self.apply_offset(draw_manager);
+        }
+
+        pending.rebuild || pending.offset
     }
 
-    fn object_names(&self, draw_manager: &mut DrawManager) -> Vec<String> {
-        let mut names = Vec::new();
+    // --- 動かす ---
 
-        for name in [
-            self.register_name.frame.as_ref(),
-            self.register_name.title_bar.as_ref(),
-            self.register_name.frame_outline.as_ref(),
-            self.register_name.title_bar_slice_line.as_ref(),
-        ]
-            .into_iter()
-            .flatten()
+    /// いまの左上。動かすとここが変わります。
+    pub fn position(&self) -> [f32; 2] {
+        [self.frame_quad.x, self.frame_quad.y]
+    }
+
+    /// 置き場所を決める。掴んでいなくても動かせます。
+    pub fn set_position(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) {
+        self.frame_quad.x = x;
+        self.frame_quad.y = y;
+
+        self.pending.offset = false;
+        self.apply_offset(draw_manager);
+    }
+
+    /// 掴んでいるか。
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    // --- 大きさを変える ---
+
+    /// いまの幅と高さ。
+    pub fn size(&self) -> [f32; 2] {
+        [self.frame_quad.width, self.frame_quad.height]
+    }
+
+    /// 縮められる幅の下限。題名が左右の余白ごと収まる幅です。
+    ///
+    /// [`WindowFrame::create_object`] より前は [`MIN_WIDTH`] を返します。
+    pub fn min_width(&self) -> f32 {
+        self.min_width
+    }
+
+    /// 題名を測って、幅の下限を出す。測れなければ [`MIN_WIDTH`]。
+    ///
+    /// 斜体や影で送り幅より右まで塗られることがあるので、塗られる右端も見ます。
+    /// 丸い角が潰れないよう、角 2 つぶんより狭くはしません。
+    fn measure_min_width(&self, resources: &Resources) -> f32 {
+        if self.title.is_empty() {
+            return MIN_WIDTH;
+        }
+        let Some(font) = resources.font(self.window_font.base_font) else {
+            return MIN_WIDTH;
+        };
+
+        let size = measure(&font, &self.title, &TextStyle::new(self.window_font.base_font_size));
+        let title_width = size.width.max(size.ink.right);
+
+        (title_width + self.gap.x * 2.0).max(self.frame_quad.quad_type.radius() * 2.0)
+    }
+
+    /// 縮められる高さの下限。帯と、下の丸い角が収まるぶん。
+    pub fn min_height(&self) -> f32 {
+        self.title_bar_height + self.frame_quad.quad_type.radius() * 2.0
+    }
+
+    /// 大きさを決める。左上は動きません。下限より小さくはなりません。
+    ///
+    /// 題名と部品も新しい幅で置き直します。
+    pub fn set_size(&mut self, draw_manager: &mut DrawManager, resources: &Resources, width: f32, height: f32) {
+        self.frame_quad.width = width.max(self.min_width);
+        self.frame_quad.height = height.max(self.min_height());
+
+        // 組み直しはずらしも含むので、待っていたぶんはここで済む。
+        self.pending = Pending::default();
+        self.rebuild_all(draw_manager, resources);
+    }
+
+    /// 縁を引いているか。
+    pub fn is_resizing(&self) -> bool {
+        self.resize.is_some()
+    }
+
+    /// その画素の位置が、どの取っ手の上か。指の形を変えるのに使います。
+    ///
+    /// 取っ手は縁の外側に [`HANDLE_OUTSIDE`]、内側に [`HANDLE_INSIDE`] の幅です。
+    /// 窓の内側の取っ手は、**手前にあるものが自分のものの時だけ**取ります。
+    /// 別の窓がかぶさっているなら、そちらの中身です。
+    pub fn resize_handle_at(&self, draw_manager: &mut DrawManager, x: f32, y: f32) -> Option<ResizeHandle> {
+        let [world_x, world_y] = self.to_world(draw_manager, x, y)?;
+
+        let quad = &self.frame_quad;
+        let (left, top) = (quad.x, quad.y);
+        let (right, bottom) = (quad.x + quad.width, quad.y + quad.height);
+
+        // 取っ手まで含めた外枠の外なら、どれでもない。
+        if world_x < left - HANDLE_OUTSIDE
+            || world_x > right + HANDLE_OUTSIDE
+            || world_y < top - HANDLE_OUTSIDE
+            || world_y > bottom + HANDLE_OUTSIDE
         {
-            names.push(name.clone());
+            return None;
         }
 
-        if let Some(text_title) = &self.register_name.text_title {
-            names.extend(draw_manager.group_names(text_title).map(String::from));
+        // 丸い角の上なら、縁は円弧。円の中心からの距離で取っ手の帯に入るかを見る。
+        let radius = quad.quad_type.radius().min(quad.width / 2.0).min(quad.height / 2.0);
+        if radius > 0.0 {
+            let center_x = if world_x < left + radius {
+                Some(left + radius)
+            } else if world_x > right - radius {
+                Some(right - radius)
+            } else {
+                None
+            };
+            let center_y = if world_y < top + radius {
+                Some(top + radius)
+            } else if world_y > bottom - radius {
+                Some(bottom - radius)
+            } else {
+                None
+            };
+
+            if let (Some(center_x), Some(center_y)) = (center_x, center_y) {
+                let distance = (world_x - center_x).hypot(world_y - center_y) - radius;
+                if distance > HANDLE_OUTSIDE || distance < -HANDLE_INSIDE {
+                    return None;
+                }
+
+                let handle = match (world_x < center_x, world_y < center_y) {
+                    (true, true) => ResizeHandle::TopLeft,
+                    (false, true) => ResizeHandle::TopRight,
+                    (true, false) => ResizeHandle::BottomLeft,
+                    (false, false) => ResizeHandle::BottomRight,
+                };
+
+                if distance < 0.0 {
+                    match draw_manager.pick(x, y) {
+                        Some(pick) if self.owns(&pick.name) => {}
+                        _ => return None,
+                    }
+                }
+
+                return Some(handle);
+            }
         }
 
-        // for window_item in &self.window_items {
-        //     names.extend(window_item.object_names());
-        // }
+        let near_left = world_x <= left + HANDLE_INSIDE;
+        let near_right = world_x >= right - HANDLE_INSIDE;
+        let near_top = world_y <= top + HANDLE_INSIDE;
+        let near_bottom = world_y >= bottom - HANDLE_INSIDE;
 
-        names
+        let handle = match (near_left, near_right, near_top, near_bottom) {
+            (true, _, true, _) => ResizeHandle::TopLeft,
+            (_, true, true, _) => ResizeHandle::TopRight,
+            (true, _, _, true) => ResizeHandle::BottomLeft,
+            (_, true, _, true) => ResizeHandle::BottomRight,
+            (true, _, _, _) => ResizeHandle::Left,
+            (_, true, _, _) => ResizeHandle::Right,
+            (_, _, true, _) => ResizeHandle::Top,
+            (_, _, _, true) => ResizeHandle::Bottom,
+            _ => return None,
+        };
+
+        if quad.hover(world_x, world_y) {
+            match draw_manager.pick(x, y) {
+                Some(pick) if self.owns(&pick.name) => {}
+                _ => return None,
+            }
+        }
+
+        Some(handle)
     }
 
-    fn resize_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        let Some(world) = self.to_world(draw_manager, x, y) else {
-            return false;
-        };
-        let Some(resize) = self.resize.as_ref() else {
-            return false;
-        };
-
-        let delta = [world[0] - resize.start[0], world[1] - resize.start[1]];
-        let quad = self.resized_quad(resize, delta);
-
-        let moved = quad.x != self.frame_quad.x || quad.y != self.frame_quad.y;
-        let sized = quad.width != self.frame_quad.width || quad.height != self.frame_quad.height;
-
-        self.frame_quad = quad;
-
-        if sized {
-            self.pending.rebuild = true;
-        } else if moved {
-            self.pending.offset = true;
-        }
-
-        true
-    }
-
+    /// 掴んだときの窓から、指が `delta` 動いたときの窓。
     fn resized_quad(&self, resize: &Resize, delta: [f32; 2]) -> Quad {
         let start = &resize.start_quad;
         let handle = resize.handle;
@@ -556,6 +737,7 @@ impl WindowFrame {
         let min_height = self.min_height();
         let mut quad = *start;
 
+        // 左と上は、**向かいの縁を止めたまま**動かす。
         if handle.moves_left() {
             let right = start.x + start.width;
             quad.x = (start.x + delta[0]).min(right - min_width);
@@ -576,91 +758,264 @@ impl WindowFrame {
         quad
     }
 
-    pub fn is_dragging(&self) -> bool {
-        self.drag.is_some()
+    /// 題名の帯。局所ではなく**いまの置き場所**での矩形。
+    pub fn title_bar_quad(&self) -> Quad {
+        Quad {
+            height: self.title_bar_height,
+            ..self.frame_quad
+        }
     }
 
-    pub fn is_resizing(&self) -> bool {
-        self.resize.is_some()
+    /// 組んだ場所からのずれを、持っている図形すべてに貼る。
+    ///
+    /// 頂点は組んだ場所に置いたままで、**親の変換だけ**をずらします。
+    /// [`Object::translate`] は複製より手前に掛かるので、字のように
+    /// 複製をたくさん持つ図形も、1 回で丸ごと動きます。
+    fn apply_offset(&mut self, draw_manager: &mut DrawManager) {
+        let x = self.frame_quad.x - self.built_origin[0];
+        let y = self.frame_quad.y - self.built_origin[1];
+
+        for name in &self.owned_names {
+            if let Some(object) = draw_manager.object_mut(name) {
+                object.translate(x, y, 0.0);
+            }
+        }
+
+        // 削る範囲はワールドで持つので、枠と一緒には動かない。いまの場所で積み直す。
+        self.apply_clip(draw_manager);
     }
 
-    pub fn min_height(&self) -> f32 {
-        self.title_bar_height + self.frame_quad.quad_type.radius() * 2.0
+    /// 窓の外を削る山。いまの置き場所と大きさで組む。
+    ///
+    /// 削るのは枠（題名の帯より下）の外です。角丸の四角で窓全体の外を削り、
+    /// 半平面で帯から上を削ります。
+    ///
+    /// 縁取りと区切り線は線の中心が縁に乗っているので、線の太さの半分だけ内側で削ります。
+    /// 部品が線の上に描かれないように。
+    fn clip_blocks(&self) -> [Block; 2] {
+        let inset = LINE_WIDTH;
+        let quad = &self.frame_quad;
+        let top = quad.y + self.title_bar_height + inset;
+
+        [
+            Block::ClipRect {
+                min: [quad.x + inset, quad.y + inset],
+                max: [quad.x + quad.width - inset, quad.y + quad.height - inset],
+                radius: (quad.quad_type.radius() - inset).max(0.0),
+                softness: 0.0,
+                invert: false,
+            },
+            Block::ClipHalfPlane {
+                normal: [0.0, -1.0],
+                distance: -top,
+                softness: 0.0,
+                invert: false,
+            },
+        ]
+    }
+
+    /// 部品の図形に、窓の外を削る山を積む。何度呼んでも 1 組にしかなりません。
+    ///
+    /// 前に積んだ山があれば差し替え、無ければ（新しく出てきた字の形など）積みます。
+    /// 山が前と同じで、図形も増えていなければ何もしません。
+    fn apply_clip(&mut self, draw_manager: &mut DrawManager) {
+        let blocks = self.clip_blocks();
+        let applied = self.applied_clip;
+
+        if !self.clip_stale && applied == Some(blocks) {
+            return;
+        }
+
+        for name in &self.owned_names[self.item_names_start..] {
+            let Some(object) = draw_manager.object_mut(name) else {
+                continue;
+            };
+
+            for (index, block) in blocks.into_iter().enumerate() {
+                let old = applied.map(|applied| applied[index]);
+                object.replace_effect(|effect| Some(*effect) == old, block);
+            }
+        }
+
+        self.applied_clip = Some(blocks);
+        self.clip_stale = false;
+    }
+
+    /// 持っている図形の名前を集め直す。図形が増えうるところ（作る・組み直す）の後で呼ぶ。
+    fn refresh_owned_names(&mut self, draw_manager: &mut DrawManager) {
+        let mut names: Vec<String> = self.shape_names().into_iter().flatten().map(String::from).collect();
+
+        if let Some(text_title) = &self.register_name.text_title {
+            names.extend(draw_manager.group_names(text_title).map(String::from));
+        }
+
+        self.item_names_start = names.len();
+
+        for window_item in &self.window_items {
+            names.extend(window_item.object_names(draw_manager));
+        }
+
+        self.owned_names = names;
+        self.clip_stale = true;
+    }
+
+    /// この窓の図形か。字の形と部品の図形も入ります。
+    fn owns(&self, name: &str) -> bool {
+        self.owned_names.iter().any(|owned| owned == name)
+    }
+
+    /// 画素の位置を、図形を組んだ座標へ戻す。
+    ///
+    /// カメラは図形ごとに持っているので、この窓のものを 1 つ借りて通します。
+    /// **[`ScaleMode`] が相対だと画素位置と座標が一致しない**ので、
+    /// 掴む判定も動かす量も、必ずここを通してから出します。
+    fn to_world(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<[f32; 2]> {
+        let name = self.register_name.title_bar.as_ref()?;
+        let object = draw_manager.object(name.as_str())?;
+
+        object.view_camera().screen_to_world(x, y)
+    }
+
+    // --- 指 ---
+
+    /// 左を押した。**この窓が取ったら `true`。**
+    ///
+    /// 取ったら呼ぶ側は後ろのものへ渡さないでください。窓が重なっているとき、
+    /// 下の窓まで一緒に動いてしまいます。
+    ///
+    /// 掴むのは題名の帯の上だけです。中身の上で掴めると、中に置いたつまみが
+    /// 動かせなくなります。
+    pub fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+        let Some(world) = self.to_world(draw_manager, x, y) else {
+            return false;
+        };
+
+        if let Some(handle) = self.resize_handle_at(draw_manager, x, y) {
+            self.resize = Some(Resize { handle, start_quad: self.frame_quad, start: world });
+            return true;
+        }
+
+        // 窓の外なら取らない。
+        if !self.frame_quad.hover(world[0], world[1]) {
+            return false;
+        }
+        // 手前のものが自分の図形でなければ、別の窓がかぶさっている（A3）。
+        match draw_manager.pick(x, y) {
+            Some(pick) if self.owns(&pick.name) => {}
+            _ => return false,
+        }
+
+        // 部品が先（A4）。取った部品があればそこで止める。
+        for window_item in &mut self.window_items {
+            if window_item.mouse_left_pressed(draw_manager, x, y) {
+                return true;
+            }
+        }
+
+        // 帯の上なら掴む。題名の字の上でも掴めるよう、図形の名前ではなく範囲で見る。
+        if self.title_bar_quad().hover(world[0], world[1]) {
+            self.drag = Some(Drag { grab: [world[0] - self.frame_quad.x, world[1] - self.frame_quad.y] });
+        }
+
+        // 窓の中身の上は、何も無くても後ろへは渡さない。
+        true
+    }
+
+    /// 左を放した。掴んでいたか、縁を引いていたら `true`。
+    pub fn mouse_left_released(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+        let dragged = self.drag.take().is_some();
+        let resized = self.resize.take().is_some();
+
+        // 押したまま外へ出た部品も戻せるよう、どこで放しても全部に渡す。
+        let mut item_changed = false;
+        for window_item in &mut self.window_items {
+            item_changed |= window_item.mouse_left_released(draw_manager, x, y);
+        }
+
+        dragged || resized || item_changed
+    }
+
+    pub fn mouse_right_pressed(&mut self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
+        let _ = (draw_manager, x, y);
+        false
+    }
+
+    pub fn mouse_right_released(&mut self) -> bool {
+        false
+    }
+
+    /// 指が動いた。掴んでいれば窓が付いてきて `true`。
+    ///
+    /// **枠の外へ出ても離しません。** 放すまでは動かし続けます。
+    /// 離すと、少し外れた瞬間に窓が置き去りになります。
+    ///
+    /// 窓の場所と大きさを覚えるだけで、図形はまだ動きません。
+    /// [`WindowFrame::update`] で移してください。
+    ///
+    /// 掴んでも引いてもいなければ、部品に渡します（指が上に来たら色を変えるなど）。
+    /// 部品の見た目が変わったときも `true`。
+    pub fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+        if self.resize.is_some() {
+            return self.resize_moved(draw_manager, x, y);
+        }
+
+        let Some(drag) = self.drag.as_ref() else {
+            let mut item_changed = false;
+            for window_item in &mut self.window_items {
+                item_changed |= window_item.mouse_moved(draw_manager, x, y);
+            }
+
+            return item_changed;
+        };
+
+        let grab = drag.grab;
+
+        let Some(world) = self.to_world(draw_manager, x, y) else {
+            return false;
+        };
+
+        // 掴んだ場所が指の下に来るように置く。動いた量を足していくのではないので、
+        // 取りこぼしてもずれが溜まらない。
+        self.frame_quad.x = world[0] - grab[0];
+        self.frame_quad.y = world[1] - grab[1];
+
+        self.pending.offset = true;
+
+        true
+    }
+
+    /// 縁を引いている指が動いた。[`WindowFrame::mouse_moved`] からだけ呼ぶ。
+    ///
+    /// 動かすときと同じく、枠の外へ出ても放すまでは付いてきます。
+    fn resize_moved(&mut self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
+        let Some(world) = self.to_world(draw_manager, x, y) else {
+            return false;
+        };
+        let Some(resize) = self.resize.as_ref() else {
+            return false;
+        };
+
+        let delta = [world[0] - resize.start[0], world[1] - resize.start[1]];
+        let quad = self.resized_quad(resize, delta);
+
+        let moved = quad.x != self.frame_quad.x || quad.y != self.frame_quad.y;
+        let sized = quad.width != self.frame_quad.width || quad.height != self.frame_quad.height;
+
+        self.frame_quad = quad;
+
+        if sized {
+            self.pending.rebuild = true;
+        } else if moved {
+            // 左や上の縁は左上も動く。形は組んだ左上で組み直すので、ずらしで合わせる。
+            self.pending.offset = true;
+        }
+
+        true
     }
 }
 
-#[derive(Default)]
-struct Pending {
-    rebuild: bool,
-    offset: bool,
-}
-
-struct Resize {
-    handle: ResizeHandle,
-    start_quad: Quad,
-    start: [f32; 2],
-}
-
-struct Drag {
-    grab: [f32; 2],
-}
-
-struct RegisterName {
-    pub frame: Option<String>,
-    pub title_bar: Option<String>,
-    pub frame_outline: Option<String>,
-    pub title_bar_slice_line: Option<String>,
-    pub text_title: Option<String>,
-}
-
-pub struct WindowFont {
-    pub base_font: FontHandle,
-}
-
-pub struct ThemeColor {
-    pub r: f32,
-    pub g: f32,
-    pub b: f32,
-    pub a: f32,
-}
-
-pub struct WindowTheme {
-    pub frame_fill_color: ThemeColor,
-    pub frame_outline_color: ThemeColor,
-    pub title_bar_fill_color: ThemeColor,
-    pub title_bar_slice_line_color: ThemeColor,
-    pub text_title_color: ThemeColor,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum ResizeHandle {
-    Left,
-    Right,
-    Top,
-    Bottom,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-}
-
-impl ResizeHandle {
-    fn moves_left(self) -> bool {
-        matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
-    }
-
-    fn moves_right(self) -> bool {
-        matches!(self, Self::Right | Self::TopRight | Self::BottomRight)
-    }
-
-    fn moves_top(self) -> bool {
-        matches!(self, Self::Top | Self::TopLeft | Self::TopRight)
-    }
-
-    fn moves_bottom(self) -> bool {
-        matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
-    }
-}
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeviceId(pub i64);
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum QuadType {
@@ -698,8 +1053,4 @@ impl Quad {
 pub struct Gap {
     pub x: f32,
     pub y: f32,
-}
-
-impl Gap {
-
 }

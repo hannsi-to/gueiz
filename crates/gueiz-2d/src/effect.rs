@@ -241,6 +241,43 @@ pub struct CustomBlock {
 }
 
 impl Block {
+    /// その点（ワールド）がこの山で削られるか。当たり判定に使う。
+    ///
+    /// 式で書いたクリップ（[`Block::ClipRect`]・[`Block::ClipEllipse`]・
+    /// [`Block::ClipHalfPlane`]）だけを、シェーダと同じ式で見ます。
+    /// 縁はなめらかに落ちるので、半分残るところ（距離 0）で切ります。
+    ///
+    /// 焼いた覆い（[`Block::ClipMask`] など）は GPU にしか無いので見ません。
+    /// クリップでない山はいつも `false`。
+    pub fn clips(&self, x: f32, y: f32) -> bool {
+        // 外を正とする符号付き距離と、裏返すか。
+        let (distance, invert) = match *self {
+            Self::ClipRect { min, max, radius, invert, .. } => {
+                (clip_rect_distance([x, y], min, max, radius), invert)
+            }
+            Self::ClipEllipse { center, radius_x, radius_y, invert, .. } => {
+                let (radius_x, radius_y) = (radius_x.max(1e-6), radius_y.max(1e-6));
+                let offset = [(x - center[0]) / radius_x, (y - center[1]) / radius_y];
+                let distance = (offset[0].hypot(offset[1]) - 1.0) * radius_x.min(radius_y);
+
+                (distance, invert)
+            }
+            Self::ClipHalfPlane { normal, distance, invert, .. } => {
+                let span = normal[0].hypot(normal[1]);
+
+                // 向きが決まらなければ削らない。シェーダと同じ。
+                if span < 1e-6 {
+                    return false;
+                }
+
+                ((normal[0] * x + normal[1] * y - distance) / span, invert)
+            }
+            _ => return false,
+        };
+
+        if invert { distance < 0.0 } else { distance > 0.0 }
+    }
+
     /// この山がどの段で効くか。
     pub fn stage(&self) -> EffectStage {
         match self {
@@ -478,6 +515,21 @@ pub(crate) struct BlockRaw {
     pub color_b: [f32; 4],
     pub kind: u32,
     pub _padding: [u32; 3],
+}
+
+/// 角の丸い矩形までの符号付き距離。中が負、外が正。シェーダの `clip_rect_distance` と同じ。
+fn clip_rect_distance(point: [f32; 2], low: [f32; 2], high: [f32; 2], radius: f32) -> f32 {
+    let half = [(high[0] - low[0]) * 0.5, (high[1] - low[1]) * 0.5];
+    let center = [(high[0] + low[0]) * 0.5, (high[1] + low[1]) * 0.5];
+
+    // 丸みは半分の幅・高さを超えられない。
+    let corner = radius.max(0.0).min(half[0].min(half[1]));
+    let offset = [
+        (point[0] - center[0]).abs() - (half[0] - corner),
+        (point[1] - center[1]).abs() - (half[1] - corner),
+    ];
+
+    offset[0].max(0.0).hypot(offset[1].max(0.0)) + offset[0].max(offset[1]).min(0.0) - corner
 }
 
 /// 図形 1 つぶんのエフェクト。段ごとに別の列で持つ。
@@ -1224,5 +1276,30 @@ mod tests {
             assert_eq!(out.len(), 1);
             assert_eq!(out[0], block.to_raw());
         }
+    }
+
+    #[test]
+    fn clips_matches_the_inside_and_outside() {
+        let rect = Block::ClipRect { min: [0.0, 0.0], max: [100.0, 50.0], radius: 10.0, softness: 0.0, invert: false };
+        assert!(!rect.clips(50.0, 25.0));
+        assert!(rect.clips(150.0, 25.0));
+        // 丸めた角の外は削られる。
+        assert!(rect.clips(1.0, 1.0));
+
+        let inverted = Block::ClipRect { min: [0.0, 0.0], max: [100.0, 50.0], radius: 0.0, softness: 0.0, invert: true };
+        assert!(inverted.clips(50.0, 25.0));
+        assert!(!inverted.clips(150.0, 25.0));
+
+        // 法線の向いている先（上）が削られる。
+        let half_plane = Block::ClipHalfPlane { normal: [0.0, -1.0], distance: -30.0, softness: 0.0, invert: false };
+        assert!(half_plane.clips(0.0, 10.0));
+        assert!(!half_plane.clips(0.0, 40.0));
+
+        let ellipse = Block::ClipEllipse { center: [0.0, 0.0], radius_x: 20.0, radius_y: 10.0, softness: 0.0, invert: false };
+        assert!(!ellipse.clips(15.0, 0.0));
+        assert!(ellipse.clips(0.0, 15.0));
+
+        // クリップでない山は削らない。
+        assert!(!Block::Tint { color: [1.0; 4] }.clips(1000.0, 1000.0));
     }
 }

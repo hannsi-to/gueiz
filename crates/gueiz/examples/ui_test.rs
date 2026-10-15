@@ -13,9 +13,10 @@ use gueiz::gpu::camera::ScaleMode;
 use gueiz::gpu::msaa::DEFAULT_MULTISAMPLE;
 use gueiz::gpu::renderer::{Renderer, RendererBackend, SurfaceSize};
 use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
+use gueiz_2d::gui::button::{Button, ButtonFont, ButtonTheme};
 use gueiz_2d::gui::image_label::{ImageLabel, ImageLabelTexture, ImageLabelTheme};
 use gueiz_2d::gui::label::{Label, LabelFont, LabelRegisterName, LabelTheme};
-use gueiz_2d::gui::test_window_frame::{DeviceId, Gap, Quad, QuadType, ResizeHandle, ThemeColor, WindowFont, WindowFrame, WindowTheme};
+use gueiz_2d::gui::window_frame::{DeviceId, Gap, Quad, QuadType, ResizeHandle, ThemeColor, WindowFont, WindowFrame, WindowTheme};
 use gueiz_2d::instance::create_instance;
 use gueiz_2d::object::Object;
 use gueiz_2d::resource::Resources;
@@ -261,11 +262,11 @@ impl Scene {
         resources.commit_textures(device, queue, &mut draw_manager)?;
 
         let mut window_frame = WindowFrame::new(
-            "TestWindowObject".to_string(),
+            "TestWindowObject1".to_string(),
             ScaleMode::Stretch,
             "TestWindow1".to_string(),
             Quad {
-                quad_type: QuadType::Normal,
+                quad_type: QuadType::Rounded {radius: 10.0},
                 x: 100.0,
                 y: 100.0,
                 width: 500.0,
@@ -278,6 +279,7 @@ impl Scene {
             },
             WindowFont {
                 base_font: font_handle,
+                base_font_size: 13.0,
             },
             WindowTheme {
                 frame_fill_color: ThemeColor {
@@ -315,6 +317,7 @@ impl Scene {
         window_frame.add_window_item(
             Box::new(
                 Label::new(
+                    "TextLabelObject1".to_string(),
                     "TestLabel1".to_string(),
                     32.0,
                     Gap {
@@ -335,9 +338,60 @@ impl Scene {
                 )
             )
         );
+        let mut click_count = 0;
+        window_frame.add_window_item(
+            Box::new(
+                Button::new(
+                    "ButtonObject1".to_string(),
+                    "Click me".to_string(),
+                    14.0,
+                    120.0,
+                    32.0,
+                    QuadType::Rounded { radius: 6.0 },
+                    Gap {
+                        x: 0.0,
+                        y: 5.0,
+                    },
+                    ButtonFont {
+                        base_font: font_handle,
+                    },
+                    ButtonTheme {
+                        fill_color: ThemeColor {
+                            r: 0.22,
+                            g: 0.36,
+                            b: 0.62,
+                            a: 1.0,
+                        },
+                        hover_fill_color: ThemeColor {
+                            r: 0.28,
+                            g: 0.44,
+                            b: 0.74,
+                            a: 1.0,
+                        },
+                        pressed_fill_color: ThemeColor {
+                            r: 0.16,
+                            g: 0.27,
+                            b: 0.48,
+                            a: 1.0,
+                        },
+                        text_color: ThemeColor {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                    }
+                )
+                .on_click(move || {
+                    click_count += 1;
+                    log::info!("the button was clicked ({click_count})");
+                })
+            )
+        );
         window_frame.add_window_item(
             Box::new(
                 ImageLabel::new(
+                    "ImageLabelObject1".to_string(),
                     image_width as f32,
                     image_height as f32,
                     Quad {
@@ -402,7 +456,11 @@ impl Scene {
                 }
 
                 (ButtonSource::Mouse(MouseButton::Left), ElementState::Released) => {
-                    self.window_frame.mouse_left_released()
+                    self.window_frame.mouse_left_released(
+                        &mut self.draw_manager,
+                        position.x as f32,
+                        position.y as f32,
+                    )
                 }
 
                 (ButtonSource::Mouse(MouseButton::Right), ElementState::Pressed) => {
@@ -421,7 +479,7 @@ impl Scene {
             },
 
             WindowEvent::PointerMoved { position, .. } => self.window_frame.mouse_moved(
-                &self.draw_manager,
+                &mut self.draw_manager,
                 position.x as f32,
                 position.y as f32,
             ),

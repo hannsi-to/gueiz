@@ -601,6 +601,17 @@ impl Object {
         &self.effects
     }
 
+    /// その点（ワールド）が、積んだクリップで削られているか。
+    ///
+    /// [`Object::hit`] はこれを見て、削られて見えていないところには当てません。
+    /// 見るのは式で書いたクリップだけです（[`Block::clips`]）。
+    pub fn is_clipped(&self, x: f32, y: f32) -> bool {
+        self.effects
+            .blocks(EffectStage::Color)
+            .iter()
+            .any(|block| block.clips(x, y))
+    }
+
     /// エフェクトを積む。段は [`Block::stage`] が決めるので指定は要らない。
     ///
     /// ```no_run
@@ -812,6 +823,11 @@ impl Object {
     ///
     /// 平面の変換（移動・回転 z・拡大）でない複製は、戻せないので飛ばします。
     pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
+        // 削られて見えていないところには当たらない。
+        if self.is_clipped(x, y) {
+            return None;
+        }
+
         let object = self.transform();
 
         // 手前から見る。重なっていたら手前が勝つ。
@@ -835,6 +851,10 @@ impl Object {
     ///
     /// どれに当たったかがすでに分かっているときに。番号が無ければ `false`。
     pub fn hit_instance(&self, index: usize, x: f32, y: f32) -> bool {
+        if self.is_clipped(x, y) {
+            return false;
+        }
+
         match self.to_local(index, x, y) {
             Some([x, y]) => self.contains(x, y),
             None => false,

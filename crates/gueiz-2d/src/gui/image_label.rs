@@ -1,6 +1,7 @@
 use gueiz_gpu::vertex::Vertex;
-use crate::gui::test_window_frame::{Gap, Quad, ThemeColor};
-use crate::gui::window_item::{WindowItem, WindowItemArguments1, WindowItemArguments2};
+use crate::draw_manager::DrawManager;
+use crate::gui::window_frame::{Gap, Quad, ThemeColor};
+use crate::gui::window_item::{replace_outline, WindowItem, WindowItemArguments1, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
 use crate::objects::rect::Rect;
@@ -31,7 +32,7 @@ pub struct ImageLabelTexture {
 }
 
 impl ImageLabel {
-    pub fn new(width: f32, height: f32, uv: Quad, gap: Gap, image_label_theme: ImageLabelTheme, image_label_texture: ImageLabelTexture) -> Self {
+    pub fn new(register_name_string: String, width: f32, height: f32, uv: Quad, gap: Gap, image_label_theme: ImageLabelTheme, image_label_texture: ImageLabelTexture) -> Self {
         Self {
             width,
             height,
@@ -40,82 +41,44 @@ impl ImageLabel {
             image_label_theme,
             image_label_texture,
             image_label_register_name: ImageLabelRegisterName {
-                image_label: None,
+                image_label: Some(register_name_string),
             }
         }
     }
 
-    fn build_shapes(
-        &mut self,
-        window_item_arguments2: &WindowItemArguments2<'_>,
-    ) -> Vec<Object> {
-        let register_name = window_item_arguments2.register_name;
-        let counter = window_item_arguments2.counter;
+    /// 絵の四角を組む。テクスチャは貼りません（組み直しでは頂点しか使わないので）。
+    ///
+    /// 組み直しで頂点だけが欲しいときは、名前に `""` を渡せば名前の確保が起きません。
+    fn build_rect(&self, name: &str, item_x: f32, item_y: f32) -> Object {
+        let color = &self.image_label_theme.texture_color;
+        let left = item_x + self.gap.x;
+        let top = item_y + self.gap.y;
 
-        self.image_label_register_name.image_label =
-            Some(format!("{register_name}-image_label-{counter}"));
-
-        let mut image_label = Rect::new(
-            self.image_label_register_name.image_label.clone().unwrap().as_str(),
-        )
+        Rect::new(name)
             .paint_type(PaintType::Fill)
             .from(Vertex::new_position_color_uv(
-                window_item_arguments2.item_x + self.gap.x,
-                window_item_arguments2.item_y + self.gap.y,
-                0.0,
-                self.image_label_theme.texture_color.r,
-                self.image_label_theme.texture_color.g,
-                self.image_label_theme.texture_color.b,
-                self.image_label_theme.texture_color.a,
-                self.uv.x,
-                self.uv.y,
+                left, top, 0.0,
+                color.r, color.g, color.b, color.a,
+                self.uv.x, self.uv.y,
             ))
             .to(Vertex::new_position_color_uv(
-                window_item_arguments2.item_x + self.gap.x + self.width,
-                window_item_arguments2.item_y + self.gap.y + self.height,
-                0.0,
-                self.image_label_theme.texture_color.r,
-                self.image_label_theme.texture_color.g,
-                self.image_label_theme.texture_color.b,
-                self.image_label_theme.texture_color.a,
-                self.uv.width,
-                self.uv.height,
+                left + self.width, top + self.height, 0.0,
+                color.r, color.g, color.b, color.a,
+                self.uv.width, self.uv.height,
             ))
-            .end();
-
-        image_label.sprite_texture(
-            window_item_arguments2
-                .resources
-                .texture(self.image_label_texture.texture_handle)
-                .ok_or("the texture was not committed")
-                .unwrap(),
-        );
-
-        vec![image_label]
+            .end()
     }
 
     fn relayout_data(&mut self, window_item_arguments: WindowItemArguments2) -> (f32, f32) {
-        let built_shapes = self.build_shapes(&window_item_arguments);
+        let object = self
+            .image_label_register_name
+            .image_label
+            .as_deref()
+            .and_then(|name| window_item_arguments.draw_manager.object_mut(name));
 
-        let names = [
-            self.image_label_register_name.image_label.clone(),
-        ];
-
-        for (name, built) in names.into_iter().zip(built_shapes) {
-            let Some(object) = name
-                .as_ref()
-                .and_then(|name| window_item_arguments.draw_manager.object_mut(name))
-            else {
-                continue;
-            };
-
-            object.begin(built.paint_type());
-
-            for vertex in built.vertices() {
-                object.put_vertex(*vertex);
-            }
-
-            object.end();
+        if let Some(object) = object {
+            let built = self.build_rect("", window_item_arguments.item_x, window_item_arguments.item_y);
+            replace_outline(object, &built);
         }
 
         (self.width + self.gap.x, self.height + self.gap.y)
@@ -124,24 +87,25 @@ impl ImageLabel {
 
 impl WindowItem for ImageLabel {
     fn create_object(&mut self, window_item_arguments: WindowItemArguments1) -> (f32, f32) {
-        let objects = self.build_shapes(
-            &WindowItemArguments2 {
-                draw_manager: window_item_arguments.draw_manager,
-                resources: window_item_arguments.resources,
-                register_name: window_item_arguments.register_name,
-                counter: window_item_arguments.counter,
-                item_x: window_item_arguments.item_x,
-                item_y: window_item_arguments.item_y,
-                width: window_item_arguments.width,
-                scale_mode: window_item_arguments.scale_mode,
-            }
-        );
+        let register_name = window_item_arguments.register_name;
+        let Some(local_name) = self.image_label_register_name.image_label.as_deref() else {
+            return (0.0, 0.0);
+        };
+        let name = format!("{register_name}-{local_name}");
 
-        for mut object in objects {
-            object.camera_for(window_item_arguments.surface_size, window_item_arguments.design, window_item_arguments.scale_mode);
-            object.instance(create_instance());
-            window_item_arguments.draw_manager.register(object);
+        let mut object = self.build_rect(&name, window_item_arguments.item_x, window_item_arguments.item_y);
+
+        match window_item_arguments.resources.texture(self.image_label_texture.texture_handle) {
+            Some(texture) => {
+                object.sprite_texture(texture);
+            }
+            None => log::warn!("the texture of '{}' is not committed; it is drawn without one", object.name()),
         }
+
+        object.camera_for(window_item_arguments.surface_size, window_item_arguments.design, window_item_arguments.scale_mode);
+        object.instance(create_instance());
+        // 名前が重なると DrawManager が後ろに数を足すので、返ってきた名前を覚える。
+        self.image_label_register_name.image_label = Some(window_item_arguments.draw_manager.register(object));
 
         (self.width + self.gap.x, self.height + self.gap.y)
     }
@@ -150,7 +114,7 @@ impl WindowItem for ImageLabel {
         self.relayout_data(window_item_arguments)
     }
 
-    fn object_names(&self) -> Vec<String> {
-        vec![self.image_label_register_name.image_label.clone().unwrap()]
+    fn object_names(&self, draw_manager: &mut DrawManager) -> Vec<String> {
+        self.image_label_register_name.image_label.iter().cloned().collect()
     }
 }
