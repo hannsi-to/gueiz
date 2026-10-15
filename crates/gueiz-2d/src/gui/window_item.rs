@@ -119,6 +119,12 @@ pub trait WindowItem {
         false
     }
 
+    /// ホイールが回った。窓の中で、手前がこの窓のときだけ届きます。
+    /// `lines` は回した行数 `[横, 縦]` で、正なら左・上へ（中身を右・下へ）送る。**取ったら `true`。**
+    fn mouse_wheel(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32, _lines: [f32; 2]) -> bool {
+        false
+    }
+
     // --- キーボード ---
     //
     // キーと文字は、フォーカスを持っている部品（`has_focus` が `true`）にだけ届きます。
@@ -238,6 +244,12 @@ pub enum EditKey {
     Up,
     /// 1 行なので、末尾へ。
     Down,
+    /// 1 ページ上へ（複数行の欄）。1 行の欄では先頭へ。
+    PageUp,
+    /// 1 ページ下へ（複数行の欄）。1 行の欄では末尾へ。
+    PageDown,
+    /// 字下げ（複数行の欄は空白を入れる）。1 行の欄では何もしない。
+    Tab,
     Home,
     End,
     Enter,

@@ -40,7 +40,7 @@
 use winit::cursor::CursorIcon;
 use winit::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
 use std::time::Instant;
-use winit::event::{ButtonSource, ElementState, Ime, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{ButtonSource, ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{ImeCapabilities, ImeEnableRequest, ImeHint, ImePurpose, ImeRequest, ImeRequestData, Window};
@@ -144,6 +144,23 @@ impl WinitGui {
                 self.pointer = Some([x, y]);
 
                 window_frame.mouse_moved(draw_manager, x, y)
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                let Some([x, y]) = self.pointer else {
+                    return false;
+                };
+                // 画素で届いたら（タッチパッドなど）、20 画素を 1 行とみなす。
+                let mut lines = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => [*x, *y],
+                    MouseScrollDelta::PixelDelta(position) => [position.x as f32 / 20.0, position.y as f32 / 20.0],
+                };
+                // Shift を押しながらの縦のホイールは、横に送る。
+                if self.modifiers.shift_key() && lines[0] == 0.0 {
+                    lines = [lines[1], 0.0];
+                }
+
+                window_frame.mouse_wheel(draw_manager, x, y, lines)
             }
 
             WindowEvent::PointerLeft { .. } => {
@@ -361,6 +378,9 @@ pub fn edit_key(key: &Key, command: bool) -> Option<EditKey> {
         Key::Named(NamedKey::ArrowRight) => Some(EditKey::Right),
         Key::Named(NamedKey::ArrowUp) => Some(EditKey::Up),
         Key::Named(NamedKey::ArrowDown) => Some(EditKey::Down),
+        Key::Named(NamedKey::PageUp) => Some(EditKey::PageUp),
+        Key::Named(NamedKey::PageDown) => Some(EditKey::PageDown),
+        Key::Named(NamedKey::Tab) => Some(EditKey::Tab),
         Key::Named(NamedKey::Home) => Some(EditKey::Home),
         Key::Named(NamedKey::End) => Some(EditKey::End),
         Key::Named(NamedKey::Enter) => Some(EditKey::Enter),
@@ -420,6 +440,8 @@ mod tests {
         assert_eq!(edit_key(&Key::Named(NamedKey::Backspace), false), Some(EditKey::Backspace));
         assert_eq!(edit_key(&Key::Named(NamedKey::ArrowLeft), false), Some(EditKey::Left));
         assert_eq!(edit_key(&Key::Named(NamedKey::ArrowUp), false), Some(EditKey::Up));
+        assert_eq!(edit_key(&Key::Named(NamedKey::PageDown), false), Some(EditKey::PageDown));
+        assert_eq!(edit_key(&Key::Named(NamedKey::Tab), false), Some(EditKey::Tab));
         assert_eq!(edit_key(&Key::Character("a".into()), false), None);
     }
 }

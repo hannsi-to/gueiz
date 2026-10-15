@@ -1284,6 +1284,29 @@ impl WindowFrame {
         true
     }
 
+    /// ホイールが回った。指の下の部品に渡す。`lines` は回した行数 `[横, 縦]` で、正なら左・上へ送る。
+    /// **この窓が取ったら `true`。**
+    pub fn mouse_wheel(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32, lines: [f32; 2]) -> bool {
+        if self.context_menu.is_open() {
+            self.context_menu.close(draw_manager);
+        }
+
+        let Some(world) = self.to_world(draw_manager, x, y) else {
+            return false;
+        };
+        if !self.frame_quad.hover(world[0], world[1]) {
+            return false;
+        }
+        match draw_manager.pick(x, y) {
+            Some(pick) if self.owns(&pick.name) => {}
+            _ => return false,
+        }
+
+        self.window_items
+            .iter_mut()
+            .any(|window_item| window_item.mouse_wheel(draw_manager, x, y, lines))
+    }
+
     pub fn mouse_right_released(&mut self) -> bool {
         false
     }

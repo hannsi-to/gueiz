@@ -14,6 +14,7 @@ use gueiz_2d::gui::button::{Button, ButtonFont, ButtonTheme};
 use gueiz_2d::gui::context_menu::{ContextMenuFont, ContextMenuLabel, ContextMenuLabels, ContextMenuLayout, ContextMenuSlicer, ContextMenuStyle, ContextMenuTheme, INPUT_TEXT_CONTEXT_MENU};
 use gueiz_2d::gui::image_label::{ImageLabel, ImageLabelTexture, ImageLabelTheme};
 use gueiz_2d::gui::input_text::{InputText, InputTextFont, InputTextTheme};
+use gueiz_2d::gui::input_textarea::InputTextarea;
 use gueiz_2d::gui::label::{Label, LabelFont, LabelTheme};
 use gueiz_2d::gui::window_frame::{Gap, Quad, QuadType, ThemeColor, WindowFont, WindowFrame, WindowTheme};
 use gueiz_2d::resource::Resources;
@@ -251,7 +252,8 @@ impl Scene {
                 x: 100.0,
                 y: 100.0,
                 width: 500.0,
-                height: 200.0,
+                // 複数行の欄まで入るように。
+                height: 360.0,
             },
             30.0,
             Gap {
@@ -498,6 +500,71 @@ impl Scene {
                 )
                 .password()
                 .on_submit(|text| log::info!("password submitted ({} characters)", text.chars().count()))
+            )
+        );
+        window_frame.add_window_item(
+            Box::new(
+                InputTextarea::new(
+                    "TextareaObject1".to_string(),
+                    "Write something...\n(Ctrl+Enter to submit)".to_string(),
+                    320.0,
+                    110.0,
+                    8.0,
+                    QuadType::Rounded { radius: 4.0 },
+                    Gap {
+                        x: 0.0,
+                        y: 5.0,
+                    },
+                    InputTextFont {
+                        base_font: font_handle,
+                        base_font_size: 14.0,
+                    },
+                    InputTextTheme {
+                        fill_color: ThemeColor {
+                            r: 0.06,
+                            g: 0.06,
+                            b: 0.07,
+                            a: 1.0,
+                        },
+                        outline_color: ThemeColor {
+                            r: 0.35,
+                            g: 0.35,
+                            b: 0.38,
+                            a: 1.0,
+                        },
+                        focus_outline_color: ThemeColor {
+                            r: 0.36,
+                            g: 0.56,
+                            b: 0.92,
+                            a: 1.0,
+                        },
+                        text_color: ThemeColor {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                        placeholder_color: ThemeColor {
+                            r: 0.5,
+                            g: 0.5,
+                            b: 0.52,
+                            a: 1.0,
+                        },
+                        caret_color: ThemeColor {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                        selection_color: ThemeColor {
+                            r: 0.24,
+                            g: 0.40,
+                            b: 0.72,
+                            a: 1.0,
+                        },
+                    }
+                )
+                .on_submit(|text| log::info!("textarea submitted ({} lines)", text.lines().count()))
             )
         );
         window_frame.add_window_item(

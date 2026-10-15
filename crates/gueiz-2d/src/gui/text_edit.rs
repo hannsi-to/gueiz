@@ -21,6 +21,8 @@ pub struct TextEdit {
     anchor: usize,
     /// 入れられる字の数の上限。
     max_length: Option<usize>,
+    /// 改行を入れられるか（複数行の欄）。
+    multiline: bool,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     /// 最後の書き換えの種類。同じ種類が続くあいだは、元に戻す記録を 1 つにまとめる。
@@ -73,6 +75,11 @@ impl TextEdit {
     /// 入れられる字の数の上限。`None` で上限なし。
     pub fn set_max_length(&mut self, max_length: Option<usize>) {
         self.max_length = max_length;
+    }
+
+    /// 改行を入れられるようにする（複数行の欄）。`\r\n` と `\r` は `\n` にそろえる。
+    pub fn set_multiline(&mut self, multiline: bool) {
+        self.multiline = multiline;
     }
 
     // --- 動かす ---
@@ -153,18 +160,43 @@ impl TextEdit {
         self.last_edit = None;
     }
 
+    /// `index` のある 1 行（改行から改行まで）を選ぶ（トリプルクリック）。改行そのものは含めない。
+    pub fn select_line_at(&mut self, index: usize) {
+        let index = self.floor_boundary(index.min(self.text.len()));
+        let start = self.text[..index].rfind('\n').map_or(0, |position| position + 1);
+        let end = self.text[index..].find('\n').map_or(self.text.len(), |position| index + position);
+
+        self.anchor = start;
+        self.cursor = end;
+        self.last_edit = None;
+    }
+
     // --- 書き換える ---
 
-    /// 字を打つ。選んでいれば置き換える。改行やタブなどの制御文字は入れない。
+    /// 字を打つ。選んでいれば置き換える。タブなどの制御文字は入れない。
+    /// 改行は [`TextEdit::set_multiline`] のときだけ入れる。
     /// 上限を超える分は捨てる。何か変わったら `true`。
     pub fn insert(&mut self, text: &str) -> bool {
+        let normalized;
+        let text = if self.multiline && text.contains('\r') {
+            normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+            normalized.as_str()
+        } else {
+            text
+        };
+        let multiline = self.multiline;
+
         let selection = self.selection();
         let removed = selection.as_ref().map_or(0, |range| self.text[range.clone()].chars().count());
         let room = self
             .max_length
             .map_or(usize::MAX, |max| max.saturating_sub(self.text.chars().count() - removed));
 
-        let text: String = text.chars().filter(|character| !character.is_control()).take(room).collect();
+        let text: String = text
+            .chars()
+            .filter(|character| !character.is_control() || (multiline && *character == '\n'))
+            .take(room)
+            .collect();
         if text.is_empty() && selection.is_none() {
             return false;
         }
@@ -509,6 +541,25 @@ mod tests {
         assert_eq!(edit.cursor(), 0);
         edit.move_to(100, false);
         assert_eq!(edit.cursor(), "日本".len());
+    }
+
+    #[test]
+    fn multiline_keeps_newlines_and_normalizes_carriage_returns() {
+        let single = edit("a\nb");
+        assert_eq!(single.text(), "ab", "1 行の欄では改行は入らない");
+
+        let mut multi = TextEdit::new();
+        multi.set_multiline(true);
+        multi.insert("one\r\ntwo\rthree\tfour");
+        assert_eq!(multi.text(), "one\ntwo\nthreefour", "改行はそろえ、タブは入れない");
+
+        multi.select_line_at(5);
+        assert_eq!(multi.selected_text(), Some("two"));
+        multi.select_line_at(0);
+        assert_eq!(multi.selected_text(), Some("one"));
+        let end = multi.text().len();
+        multi.select_line_at(end);
+        assert_eq!(multi.selected_text(), Some("threefour"));
     }
 
     #[test]

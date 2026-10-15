@@ -994,11 +994,11 @@ impl WindowItem for InputText {
                 self.edit.move_right(shift, word);
                 false
             }
-            EditKey::Home | EditKey::Up => {
+            EditKey::Home | EditKey::Up | EditKey::PageUp => {
                 self.edit.move_home(shift);
                 false
             }
-            EditKey::End | EditKey::Down => {
+            EditKey::End | EditKey::Down | EditKey::PageDown => {
                 self.edit.move_end(shift);
                 false
             }
@@ -1013,6 +1013,8 @@ impl WindowItem for InputText {
                 return false;
             }
             EditKey::Escape => return self.unfocus(draw_manager),
+            // 1 行の欄では字下げしない（Web では次の欄へ移る）。
+            EditKey::Tab => return false,
         };
 
         if edited {
@@ -1047,7 +1049,7 @@ impl WindowItem for InputText {
 ///
 /// 並べると 1 字が 1 つのグリフになるので、グリフの右端がその字の後ろの境目です。
 /// 書体に無い字は飛ばされて数が合わなくなるので、そのときだけ境目ごとに測ります（遅い）。
-fn measure_stops(font: &Font, text: &str, style: &TextStyle) -> Vec<(usize, f32)> {
+pub(crate) fn measure_stops(font: &Font, text: &str, style: &TextStyle) -> Vec<(usize, f32)> {
     let placed = layout(font, text, style);
 
     if placed.glyphs.len() == text.chars().count() {
