@@ -21,7 +21,6 @@ use crate::text::{TextArea, TextLayoutData, TextLocation, TextRenderer, TextStyl
 /// 指が上にある・押しているあいだは、[`ButtonTheme`] の色に塗り替えます。
 pub struct Button {
     text: String,
-    text_size: f32,
     width: f32,
     height: f32,
     quad_type: QuadType,
@@ -45,6 +44,7 @@ pub struct ButtonRegisterName {
 
 pub struct ButtonFont {
     pub base_font: FontHandle,
+    pub base_font_size: f32,
 }
 
 pub struct ButtonTheme {
@@ -57,10 +57,9 @@ pub struct ButtonTheme {
 }
 
 impl Button {
-    pub fn new(register_name_string: String, text: String, text_size: f32, width: f32, height: f32, quad_type: QuadType, gap: Gap, button_font: ButtonFont, button_theme: ButtonTheme) -> Self {
+    pub fn new(register_name_string: String, text: String, width: f32, height: f32, quad_type: QuadType, gap: Gap, button_font: ButtonFont, button_theme: ButtonTheme) -> Self {
         Self {
             text,
-            text_size,
             width,
             height,
             quad_type,
@@ -135,7 +134,7 @@ impl Button {
 
         TextLayoutData {
             text: self.text.clone(),
-            style: TextStyle::new(self.text_size),
+            style: TextStyle::new(self.button_font.base_font_size),
             text_location: TextLocation::Area {
                 area: TextArea::new(x + self.gap.x, y + self.gap.y, self.width, self.height).centered(),
             },

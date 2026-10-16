@@ -11,6 +11,8 @@ use gueiz::gpu::renderer::{Renderer, RendererBackend, SurfaceSize};
 use gueiz::winit_gui::WinitGui;
 use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
 use gueiz_2d::gui::button::{Button, ButtonFont, ButtonTheme};
+use gueiz_2d::gui::check_box::{Axis, CheckBox, CheckBoxFont, CheckBoxShape, CheckBoxTheme};
+use gueiz_2d::gui::radio::{Radio, RadioFont, RadioShape, RadioTheme};
 use gueiz_2d::gui::context_menu::{ContextMenuFont, ContextMenuLabel, ContextMenuLabels, ContextMenuLayout, ContextMenuSlicer, ContextMenuStyle, ContextMenuTheme, INPUT_TEXT_CONTEXT_MENU};
 use gueiz_2d::gui::image_label::{ImageLabel, ImageLabelTexture, ImageLabelTheme};
 use gueiz_2d::gui::input_text::{InputText, InputTextFont, InputTextTheme};
@@ -232,7 +234,7 @@ impl Scene {
         let font_path = if cfg!(target_os = "windows") {
             "C:/Windows/Fonts/YuGothM.ttc".to_string()
         } else {
-            "/System/Library/Fonts/Avenir Next.ttc".to_string()
+            "/System/Library/Fonts/AquaKana.ttc".to_string()
         };
 
         let mut resources = Resources::new();
@@ -327,7 +329,6 @@ impl Scene {
                 Button::new(
                     "ButtonObject1".to_string(),
                     "Click me".to_string(),
-                    14.0,
                     120.0,
                     32.0,
                     QuadType::Rounded { radius: 6.0 },
@@ -337,6 +338,7 @@ impl Scene {
                     },
                     ButtonFont {
                         base_font: font_handle,
+                        base_font_size: 14.0,
                     },
                     ButtonTheme {
                         fill_color: ThemeColor {
@@ -371,6 +373,58 @@ impl Scene {
                 })
             )
         );
+        let check_box_theme = || CheckBoxTheme {
+            outline_color: ThemeColor { r: 0.8, g: 0.8, b: 0.8, a: 1.0 },
+            enable_color: ThemeColor { r: 0.28, g: 0.44, b: 0.74, a: 1.0 },
+            disable_color: ThemeColor { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+            text_color: ThemeColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+        };
+        let mut check_box = CheckBox::new(
+            "CheckBoxObject1".to_string(),
+            Axis::Row,
+            Gap {
+                x: 0.0,
+                y: 5.0,
+            },
+            CheckBoxFont {
+                base_font: font_handle,
+                base_font_size: 13.0,
+            },
+        )
+        .on_click(move |check_boxes, changed, enables, disables| {
+            log::info!("the check box {changed:?} was clicked: enables {enables:?}, disables {disables:?}");
+        });
+        check_box
+            .add_check_box_item("check_box1".to_string(), 20.0, 20.0, Gap { x: 0.0, y: 0.0 }, 4.0, CheckBoxShape::Circle, false, check_box_theme())
+            .add_check_box_item("check_box2".to_string(), 20.0, 20.0, Gap { x: 12.0, y: 0.0 }, 4.0, CheckBoxShape::Rect, true, check_box_theme())
+            .add_check_box_item("check_box3".to_string(), 20.0, 20.0, Gap { x: 12.0, y: 0.0 }, 4.0, CheckBoxShape::RectRounded, false, check_box_theme());
+        window_frame.add_window_item(Box::new(check_box));
+        let radio_theme = || RadioTheme {
+            outline_color: ThemeColor { r: 0.8, g: 0.8, b: 0.8, a: 1.0 },
+            enable_color: ThemeColor { r: 0.28, g: 0.44, b: 0.74, a: 1.0 },
+            disable_color: ThemeColor { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+            text_color: ThemeColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+        };
+        let mut radio = Radio::new(
+            "RadioObject1".to_string(),
+            Axis::Row,
+            Gap {
+                x: 0.0,
+                y: 5.0,
+            },
+            RadioFont {
+                base_font: font_handle,
+                base_font_size: 13.0,
+            },
+        )
+        .on_click(move |_radios, selected, previous| {
+            log::info!("the radio {selected} was selected (previous: {previous:?})");
+        });
+        radio
+            .add_radio_item("radio1".to_string(), 20.0, 20.0, Gap { x: 0.0, y: 0.0 }, 5.0, RadioShape::Circle, true, radio_theme())
+            .add_radio_item("radio2".to_string(), 20.0, 20.0, Gap { x: 12.0, y: 0.0 }, 5.0, RadioShape::Circle, false, radio_theme())
+            .add_radio_item("radio3".to_string(), 20.0, 20.0, Gap { x: 12.0, y: 0.0 }, 5.0, RadioShape::Circle, false, radio_theme());
+        window_frame.add_window_item(Box::new(radio));
         window_frame.add_window_item(
             Box::new(
                 InputText::new(
