@@ -1009,10 +1009,10 @@ impl WindowItem for Color {
         }
     }
 
-    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        let pointer = Pointer::new(x, y);
+    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let (x, y) = (pointer.x, pointer.y);
 
-        if !self.hit(draw_manager, &pointer) {
+        if !self.hit(draw_manager, pointer) {
             // パレットの外を押したら、決めて閉じる（押したものは後ろへ渡す）。
             self.close(draw_manager, false);
             return false;
@@ -1061,7 +1061,7 @@ impl WindowItem for Color {
         true
     }
 
-    fn mouse_left_released(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
+    fn mouse_left_released(&mut self, _draw_manager: &mut DrawManager, _pointer: &Pointer) -> bool {
         self.dragging.take().is_some()
     }
 

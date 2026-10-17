@@ -1064,8 +1064,9 @@ impl WindowItem for InputTextarea {
         }
     }
 
-    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        if !self.hit(draw_manager, &Pointer::new(x, y)) {
+    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let (x, y) = (pointer.x, pointer.y);
+        if !self.hit(draw_manager, pointer) {
             return false;
         }
 
@@ -1106,7 +1107,7 @@ impl WindowItem for InputTextarea {
         true
     }
 
-    fn mouse_left_released(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
+    fn mouse_left_released(&mut self, _draw_manager: &mut DrawManager, _pointer: &Pointer) -> bool {
         self.scrollbar_drag = None;
         self.drag_pointer = None;
         self.last_auto_scroll = None;
@@ -1151,8 +1152,8 @@ impl WindowItem for InputTextarea {
         true
     }
 
-    fn mouse_wheel(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32, [lines_x, lines_y]: [f32; 2]) -> bool {
-        if !self.hit(draw_manager, &Pointer::new(x, y)) {
+    fn mouse_wheel(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer, [lines_x, lines_y]: [f32; 2]) -> bool {
+        if !self.hit(draw_manager, pointer) {
             return false;
         }
 
@@ -1188,8 +1189,9 @@ impl WindowItem for InputTextarea {
         self.edit.selected_text().map(String::from)
     }
 
-    fn context_menu(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> Option<ContextMenuRequest> {
-        if !self.hit(draw_manager, &Pointer::new(x, y)) {
+    fn context_menu(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> Option<ContextMenuRequest> {
+        let (x, y) = (pointer.x, pointer.y);
+        if !self.hit(draw_manager, pointer) {
             return None;
         }
 

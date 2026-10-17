@@ -591,8 +591,9 @@ impl<T: NumberValue> WindowItem for Range<T> {
             .collect()
     }
 
-    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        if !self.hit(draw_manager, &Pointer::new(x, y)) {
+    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let (x, y) = (pointer.x, pointer.y);
+        if !self.hit(draw_manager, pointer) {
             return false;
         }
         let Some(local) = self.local(draw_manager, x, y) else {
@@ -613,12 +614,13 @@ impl<T: NumberValue> WindowItem for Range<T> {
         true
     }
 
-    fn mouse_left_released(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+    fn mouse_left_released(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let (x, y) = (pointer.x, pointer.y);
         if self.drag_offset.take().is_none() {
             return false;
         }
 
-        self.hovered = self.local(draw_manager, x, y).is_some_and(|local| self.over_thumb(local)) && self.hit(draw_manager, &Pointer::new(x, y));
+        self.hovered = self.local(draw_manager, x, y).is_some_and(|local| self.over_thumb(local)) && self.hit(draw_manager, pointer);
         self.place(draw_manager);
 
         if self.current() != self.drag_start {

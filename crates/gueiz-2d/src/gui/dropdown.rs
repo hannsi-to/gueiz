@@ -683,8 +683,9 @@ impl WindowItem for Dropdown {
         }
     }
 
-    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        if !self.hit(draw_manager, &Pointer::new(x, y)) {
+    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let (x, y) = (pointer.x, pointer.y);
+        if !self.hit(draw_manager, pointer) {
             // 一覧の外を押したら、選ばずに閉じる（押したものは後ろへ渡す）。
             self.close(draw_manager);
             return false;
@@ -727,7 +728,8 @@ impl WindowItem for Dropdown {
         }
     }
 
-    fn mouse_wheel(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32, lines: [f32; 2]) -> bool {
+    fn mouse_wheel(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer, lines: [f32; 2]) -> bool {
+        let (x, y) = (pointer.x, pointer.y);
         let over_list = self.open && self.local(draw_manager, x, y).is_some_and(|local| within(self.list_bounds(), 0.0, local));
         if !over_list || lines[1] == 0.0 || !self.scrolls() {
             return over_list;

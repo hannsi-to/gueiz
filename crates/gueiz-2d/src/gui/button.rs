@@ -280,8 +280,8 @@ impl WindowItem for Button {
         names
     }
 
-    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        if !self.hit(draw_manager, &Pointer::new(x, y)) {
+    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        if !self.hit(draw_manager, pointer) {
             return false;
         }
 
@@ -289,12 +289,12 @@ impl WindowItem for Button {
         true
     }
 
-    fn mouse_left_released(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+    fn mouse_left_released(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
         if !self.armed {
             return false;
         }
 
-        let hovered = self.hit(draw_manager, &Pointer::new(x, y));
+        let hovered = self.hit(draw_manager, pointer);
         self.set_state(draw_manager, hovered, false);
 
         if hovered {

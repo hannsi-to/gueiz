@@ -14,6 +14,7 @@ use gueiz_2d::gui::button::{Button, ButtonFont, ButtonTheme};
 use gueiz_2d::gui::check_box::{Axis, CheckBox, CheckBoxFont, CheckBoxShape, CheckBoxTheme};
 use gueiz_2d::gui::color::{Color, ColorFont, ColorTheme, Rgba};
 use gueiz_2d::gui::dropdown::{Dropdown, DropdownFont, DropdownTheme};
+use gueiz_2d::gui::gui_manager::GuiManager;
 use gueiz_2d::gui::radio::{Radio, RadioFont, RadioShape, RadioTheme};
 use gueiz_2d::gui::context_menu::{ContextMenuFont, ContextMenuLabel, ContextMenuLabels, ContextMenuLayout, ContextMenuSlicer, ContextMenuStyle, ContextMenuTheme, INPUT_TEXT_CONTEXT_MENU};
 use gueiz_2d::gui::image_label::{ImageLabel, ImageLabelTexture, ImageLabelTheme};
@@ -23,7 +24,7 @@ use gueiz_2d::gui::label::{Label, LabelFont, LabelTheme};
 use gueiz_2d::gui::number::{Number, NumberFont, NumberTheme};
 use gueiz_2d::gui::range::{Range, RangeTheme};
 use gueiz_2d::gui::window_frame::{Gap, Quad, QuadType, ThemeColor, WindowFont, WindowFrame, WindowTheme};
-use gueiz_2d::resource::Resources;
+use gueiz_2d::resource::{FontHandle, Resources};
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -72,8 +73,8 @@ impl Application {
             return;
         };
 
-        // 指で動かしたぶんを、描く前に 1 回だけ組み直す。
-        scene.window_frame.update(&mut scene.draw_manager, &scene.resources);
+        // 指で動かしたぶんを、描く前に 1 回だけ組み直す（すべての窓）。
+        scene.gui.update(&mut scene.draw_manager, &scene.resources);
 
         if let Err(error) = scene.draw_manager.prepare() {
             log::error!("failed to prepare the frame: {error}");
@@ -181,7 +182,7 @@ impl ApplicationHandler for Application {
         let response = self.winit_gui.window_event(
             window.as_ref(),
             &event,
-            &mut scene.window_frame,
+            &mut scene.gui,
             &mut scene.draw_manager,
             &scene.resources,
         );
@@ -195,7 +196,7 @@ impl ApplicationHandler for Application {
     // キャレットの点滅など、gui が時間で動くあいだは、その時刻に起きて描き直す。
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
         if let (Some(window), Some(scene)) = (self.window.as_ref(), self.scene.as_ref()) {
-            self.winit_gui.about_to_wait(event_loop, window.as_ref(), &scene.window_frame);
+            self.winit_gui.about_to_wait(event_loop, window.as_ref(), &scene.gui);
         }
     }
 
@@ -210,7 +211,8 @@ struct Scene {
     draw_manager: DrawManager,
     /// 窓が使う書体などを預かる。窓は取っ手だけを持つ。
     resources: Resources,
-    window_frame: WindowFrame,
+    /// 窓を重ねて持つ。押した窓が手前に出て、キーはフォーカスを持つ窓に届く。
+    gui: GuiManager,
     scale_factor: f32,
 }
 
@@ -230,6 +232,8 @@ impl Scene {
 
         let descriptor = DrawManagerDescriptor {
             sample_count: renderer.sample_count(),
+            // 窓 2 枚ぶんの字の形と部品の頂点が入るように、既定（4 MiB）より広く取る。
+            pool_size: 16 * 1024 * 1024,
             ..DrawManagerDescriptor::default()
         };
 
@@ -1000,23 +1004,176 @@ impl Scene {
                 ..ContextMenuLayout::default()
             },
         });
-        window_frame.create_object(
-            &mut draw_manager,
-            &resources,
-            surface_size,
-            surface_size.to_logical(scale_factor),
-        );
+        // 後から足した窓ほど手前に出る。押した窓は手前に出る。
+        let design = surface_size.to_logical(scale_factor);
+        let mut gui = GuiManager::new();
+        gui.add_window(&mut draw_manager, &resources, surface_size, design, window_frame);
+        gui.add_window(&mut draw_manager, &resources, surface_size, design, Self::sub_window(font_handle, input_text_theme));
 
         Ok(Self {
             draw_manager,
             resources,
-            window_frame,
+            gui,
             scale_factor,
         })
     }
 
+    /// 1 枚目の窓の左上に重ねる、小さな 2 枚目の窓。
+    ///
+    /// 押したほうの窓が手前に出ることと、字を打てる欄が窓をまたいでも 1 つしかフォーカスを
+    /// 持たないことを確かめるためのもの。
+    fn sub_window(font_handle: FontHandle, input_text_theme: InputTextTheme) -> WindowFrame {
+        let mut window_frame = WindowFrame::new(
+            "TestWindowObject2".to_string(),
+            ScaleMode::Stretch,
+            "TestWindow2".to_string(),
+            Quad {
+                quad_type: QuadType::Rounded { radius: 10.0 },
+                x: 20.0,
+                y: 30.0,
+                width: 280.0,
+                height: 170.0,
+            },
+            30.0,
+            Gap {
+                x: 5.0,
+                y: 5.0,
+            },
+            WindowFont {
+                base_font: font_handle,
+                base_font_size: 13.0,
+            },
+            WindowTheme {
+                frame_fill_color: ThemeColor {
+                    r: 0.14,
+                    g: 0.12,
+                    b: 0.16,
+                    a: 1.0,
+                },
+                frame_outline_color: ThemeColor {
+                    r: 0.55,
+                    g: 0.45,
+                    b: 0.6,
+                    a: 1.0,
+                },
+                title_bar_fill_color: ThemeColor {
+                    r: 0.14,
+                    g: 0.12,
+                    b: 0.16,
+                    a: 1.0,
+                },
+                title_bar_slice_line_color: ThemeColor {
+                    r: 0.3,
+                    g: 0.26,
+                    b: 0.34,
+                    a: 1.0,
+                },
+                text_title_color: ThemeColor {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+            },
+        );
+        window_frame.add_window_item(
+            Box::new(
+                Label::new(
+                    "TextLabelObject2".to_string(),
+                    "Click a window to bring it to the front".to_string(),
+                    14.0,
+                    Gap {
+                        x: 0.0,
+                        y: 5.0,
+                    },
+                    LabelFont {
+                        base_font: font_handle,
+                    },
+                    LabelTheme {
+                        label_color: ThemeColor {
+                            r: 0.8,
+                            g: 0.8,
+                            b: 0.82,
+                            a: 1.0,
+                        },
+                    },
+                )
+            )
+        );
+        window_frame.add_window_item(
+            Box::new(
+                Button::new(
+                    "ButtonObject2".to_string(),
+                    "Hello".to_string(),
+                    120.0,
+                    32.0,
+                    QuadType::Rounded { radius: 6.0 },
+                    Gap {
+                        x: 0.0,
+                        y: 10.0,
+                    },
+                    ButtonFont {
+                        base_font: font_handle,
+                        base_font_size: 14.0,
+                    },
+                    ButtonTheme {
+                        fill_color: ThemeColor {
+                            r: 0.42,
+                            g: 0.3,
+                            b: 0.56,
+                            a: 1.0,
+                        },
+                        hover_fill_color: ThemeColor {
+                            r: 0.5,
+                            g: 0.37,
+                            b: 0.66,
+                            a: 1.0,
+                        },
+                        pressed_fill_color: ThemeColor {
+                            r: 0.32,
+                            g: 0.22,
+                            b: 0.44,
+                            a: 1.0,
+                        },
+                        text_color: ThemeColor {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                    }
+                )
+                .on_click(|| log::info!("hello from the second window"))
+            )
+        );
+        window_frame.add_window_item(
+            Box::new(
+                InputText::new(
+                    "InputTextObject2".to_string(),
+                    "Type in the second window...".to_string(),
+                    240.0,
+                    28.0,
+                    8.0,
+                    QuadType::Rounded { radius: 4.0 },
+                    Gap {
+                        x: 0.0,
+                        y: 10.0,
+                    },
+                    InputTextFont {
+                        base_font: font_handle,
+                        base_font_size: 14.0,
+                    },
+                    input_text_theme,
+                )
+                .on_submit(|text| log::info!("submitted in the second window: {text}"))
+            )
+        );
+
+        window_frame
+    }
+
     fn resize(&mut self, surface_size: SurfaceSize) {
-        self.window_frame.resize(
+        self.gui.resize(
             &mut self.draw_manager,
             surface_size,
             surface_size.to_logical(self.scale_factor),

@@ -14,3 +14,4 @@ pub mod number;
 pub mod range;
 pub mod color;
 pub mod dropdown;
+pub mod gui_manager;

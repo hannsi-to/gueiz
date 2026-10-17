@@ -1,4 +1,4 @@
-//! winit と gui（[`WindowFrame`]）をつなぐ。
+//! winit と gui（[`WindowFrame`] か、窓を何枚も持つ [`GuiManager`]）をつなぐ。
 //!
 //! gui は winit を知りません。指の位置・押したボタン・打った文字を受け取り、
 //! 「ここではこの形の指を出したい」「いま文字を打ち込める」を答えるだけです。
@@ -33,9 +33,18 @@
 //! }
 //! ```
 //!
-//! 描く前には、いつもどおり [`WindowFrame::update`] を 1 フレーム 1 回呼んでください。
+//! 窓を何枚も置くなら、`&mut scene.window_frame` の代わりに [`GuiManager`] を渡します
+//! （どちらも [`Gui`] を実装しています）。
+//!
+//! 描く前には、いつもどおり [`WindowFrame::update`]（[`GuiManager::update`]）を 1 フレーム 1 回呼んでください。
 //! キャレットの点滅などを動かすには、`ApplicationHandler::about_to_wait` から
 //! [`WinitGui::about_to_wait`] も呼んでください。
+//!
+//! [`WindowFrame`]: gueiz_2d::gui::window_frame::WindowFrame
+//! [`WindowFrame::update`]: gueiz_2d::gui::window_frame::WindowFrame::update
+//! [`GuiManager`]: gueiz_2d::gui::gui_manager::GuiManager
+//! [`GuiManager::update`]: gueiz_2d::gui::gui_manager::GuiManager::update
+//! [`Gui`]: gueiz_2d::gui::gui_manager::Gui
 
 use winit::cursor::CursorIcon;
 use winit::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
@@ -46,7 +55,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{ImeCapabilities, ImeEnableRequest, ImeHint, ImePurpose, ImeRequest, ImeRequestData, Window};
 
 use gueiz_2d::draw_manager::DrawManager;
-use gueiz_2d::gui::window_frame::WindowFrame;
+use gueiz_2d::gui::gui_manager::Gui;
 use gueiz_2d::gui::clipboard::Clipboard;
 use gueiz_2d::gui::window_item::{CursorShape, EditKey, KeyModifiers};
 use gueiz_2d::resource::Resources;
@@ -90,17 +99,17 @@ impl WinitGui {
         &mut self,
         window: &dyn Window,
         event: &WindowEvent,
-        window_frame: &mut WindowFrame,
+        gui: &mut dyn Gui,
         draw_manager: &mut DrawManager,
         resources: &Resources,
     ) -> GuiResponse {
-        let mut consumed = self.dispatch(event, window_frame, draw_manager, resources);
+        let mut consumed = self.dispatch(event, gui, draw_manager, resources);
 
         // 右クリックのメニューで押された項目の関数。
-        consumed |= window_frame.run_context_menu_event(draw_manager, resources, &mut self.clipboard);
+        consumed |= gui.run_context_menu_event(draw_manager, resources, &mut self.clipboard);
 
-        self.update_cursor(window, window_frame, draw_manager);
-        self.update_ime(window, window_frame, draw_manager);
+        self.update_cursor(window, gui, draw_manager);
+        self.update_ime(window, gui, draw_manager);
 
         GuiResponse {
             consumed,
@@ -113,7 +122,7 @@ impl WinitGui {
     fn dispatch(
         &mut self,
         event: &WindowEvent,
-        window_frame: &mut WindowFrame,
+        gui: &mut dyn Gui,
         draw_manager: &mut DrawManager,
         resources: &Resources,
     ) -> bool {
@@ -124,16 +133,16 @@ impl WinitGui {
 
                 match (button, state) {
                     (ButtonSource::Mouse(MouseButton::Left), ElementState::Pressed) => {
-                        window_frame.mouse_left_pressed(draw_manager, x, y)
+                        gui.mouse_left_pressed(draw_manager, x, y)
                     }
                     (ButtonSource::Mouse(MouseButton::Left), ElementState::Released) => {
-                        window_frame.mouse_left_released(draw_manager, x, y)
+                        gui.mouse_left_released(draw_manager, x, y)
                     }
                     (ButtonSource::Mouse(MouseButton::Right), ElementState::Pressed) => {
-                        window_frame.mouse_right_pressed(draw_manager, x, y)
+                        gui.mouse_right_pressed(draw_manager, x, y)
                     }
                     (ButtonSource::Mouse(MouseButton::Right), ElementState::Released) => {
-                        window_frame.mouse_right_released()
+                        gui.mouse_right_released()
                     }
                     _ => false,
                 }
@@ -143,7 +152,7 @@ impl WinitGui {
                 let [x, y] = [position.x as f32, position.y as f32];
                 self.pointer = Some([x, y]);
 
-                window_frame.mouse_moved(draw_manager, x, y)
+                gui.mouse_moved(draw_manager, x, y)
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
@@ -160,7 +169,7 @@ impl WinitGui {
                     lines = [lines[1], 0.0];
                 }
 
-                window_frame.mouse_wheel(draw_manager, x, y, lines)
+                gui.mouse_wheel(draw_manager, x, y, lines)
             }
 
             WindowEvent::PointerLeft { .. } => {
@@ -170,18 +179,18 @@ impl WinitGui {
 
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
-                window_frame.modifiers_changed(self.key_modifiers());
+                gui.modifiers_changed(self.key_modifiers());
                 false
             }
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                self.key_input(event, window_frame, draw_manager, resources)
+                self.key_input(event, gui, draw_manager, resources)
             }
 
-            WindowEvent::Ime(Ime::Commit(text)) => window_frame.text_input(draw_manager, resources, text),
+            WindowEvent::Ime(Ime::Commit(text)) => gui.text_input(draw_manager, resources, text),
 
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
-                window_frame.ime_preedit(draw_manager, resources, text, cursor.map(|(start, _)| start))
+                gui.ime_preedit(draw_manager, resources, text, cursor.map(|(start, _)| start))
             }
 
             _ => false,
@@ -189,17 +198,17 @@ impl WinitGui {
     }
 
     /// キーを、文字を書き換えるキーか打った文字に直して渡す。
-    fn key_input(&mut self, event: &KeyEvent, window_frame: &mut WindowFrame, draw_manager: &mut DrawManager, resources: &Resources) -> bool {
+    fn key_input(&mut self, event: &KeyEvent, gui: &mut dyn Gui, draw_manager: &mut DrawManager, resources: &Resources) -> bool {
         let command = self.command();
 
         if command {
-            if let Some(handled) = self.shortcut(&event.logical_key, window_frame, draw_manager, resources) {
+            if let Some(handled) = self.shortcut(&event.logical_key, gui, draw_manager, resources) {
                 return handled;
             }
         }
 
         if let Some(key) = edit_key(&event.logical_key, command) {
-            return window_frame.key_pressed(draw_manager, resources, key);
+            return gui.key_pressed(draw_manager, resources, key);
         }
 
         // Ctrl を押しながらの字は、打った字ではない。
@@ -208,13 +217,13 @@ impl WinitGui {
         }
 
         match &event.text {
-            Some(text) => window_frame.text_input(draw_manager, resources, text),
+            Some(text) => gui.text_input(draw_manager, resources, text),
             None => false,
         }
     }
 
     /// Ctrl（macOS は Command）との組み合わせ。組み合わせでなければ `None`。
-    fn shortcut(&mut self, key: &Key, window_frame: &mut WindowFrame, draw_manager: &mut DrawManager, resources: &Resources) -> Option<bool> {
+    fn shortcut(&mut self, key: &Key, gui: &mut dyn Gui, draw_manager: &mut DrawManager, resources: &Resources) -> Option<bool> {
         let Key::Character(character) = key else {
             return None;
         };
@@ -222,14 +231,14 @@ impl WinitGui {
 
         let clipboard = &mut self.clipboard;
         let handled = match character.to_lowercase().as_str() {
-            "a" => window_frame.key_pressed(draw_manager, resources, EditKey::SelectAll),
-            "z" if shift => window_frame.key_pressed(draw_manager, resources, EditKey::Redo),
-            "z" => window_frame.key_pressed(draw_manager, resources, EditKey::Undo),
-            "y" => window_frame.key_pressed(draw_manager, resources, EditKey::Redo),
+            "a" => gui.key_pressed(draw_manager, resources, EditKey::SelectAll),
+            "z" if shift => gui.key_pressed(draw_manager, resources, EditKey::Redo),
+            "z" => gui.key_pressed(draw_manager, resources, EditKey::Undo),
+            "y" => gui.key_pressed(draw_manager, resources, EditKey::Redo),
             // 見た目は変わらないが、選んでいたら受け取ったので後ろへは渡さない。
-            "c" => window_frame.copy_to_clipboard(clipboard),
-            "x" => window_frame.cut_to_clipboard(draw_manager, resources, clipboard),
-            "v" => window_frame.paste_from_clipboard(draw_manager, resources, clipboard),
+            "c" => gui.copy_to_clipboard(clipboard),
+            "x" => gui.cut_to_clipboard(draw_manager, resources, clipboard),
+            "v" => gui.paste_from_clipboard(draw_manager, resources, clipboard),
             _ => return None,
         };
 
@@ -240,8 +249,8 @@ impl WinitGui {
     ///
     /// gui が時間で動いているあいだ（キャレットの点滅、引いたままの自動スクロール）は、
     /// その時刻に起きて描き直しを頼みます。動くものが無ければ、次の入力まで眠ります。
-    pub fn about_to_wait(&self, event_loop: &dyn ActiveEventLoop, window: &dyn Window, window_frame: &WindowFrame) {
-        match window_frame.next_update() {
+    pub fn about_to_wait(&self, event_loop: &dyn ActiveEventLoop, window: &dyn Window, gui: &dyn Gui) {
+        match gui.next_update() {
             Some(at) if at <= Instant::now() => {
                 window.request_redraw();
                 // 描いたあとの update で次の時刻が決まるので、それまでは待つ。
@@ -270,9 +279,9 @@ impl WinitGui {
     }
 
     /// 指の形を、窓が答えた形に合わせる。変わったときだけ窓に伝える。
-    fn update_cursor(&mut self, window: &dyn Window, window_frame: &WindowFrame, draw_manager: &DrawManager) {
+    fn update_cursor(&mut self, window: &dyn Window, gui: &dyn Gui, draw_manager: &DrawManager) {
         let shape = match self.pointer {
-            Some([x, y]) => window_frame.cursor_shape(draw_manager, x, y),
+            Some([x, y]) => gui.cursor_shape(draw_manager, x, y),
             None => CursorShape::Default,
         };
 
@@ -283,9 +292,9 @@ impl WinitGui {
     }
 
     /// 打ち込む欄がフォーカスを持っていれば IME を点け、候補を字を打つ位置の近くに出す。
-    fn update_ime(&mut self, window: &dyn Window, window_frame: &WindowFrame, draw_manager: &DrawManager) {
-        let focused = window_frame.wants_ime();
-        let area = window_frame.ime_cursor_area(draw_manager);
+    fn update_ime(&mut self, window: &dyn Window, gui: &dyn Gui, draw_manager: &DrawManager) {
+        let focused = gui.wants_ime();
+        let area = gui.ime_cursor_area(draw_manager);
 
         if focused != self.ime_enabled {
             if focused {

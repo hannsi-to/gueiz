@@ -845,8 +845,9 @@ impl WindowItem for InputText {
         }
     }
 
-    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        if !self.hit(draw_manager, &Pointer::new(x, y)) {
+    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let (x, y) = (pointer.x, pointer.y);
+        if !self.hit(draw_manager, pointer) {
             return false;
         }
 
@@ -874,7 +875,7 @@ impl WindowItem for InputText {
         true
     }
 
-    fn mouse_left_released(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
+    fn mouse_left_released(&mut self, _draw_manager: &mut DrawManager, _pointer: &Pointer) -> bool {
         self.drag_pointer = None;
         self.last_auto_scroll = None;
         std::mem::take(&mut self.dragging)
@@ -937,8 +938,9 @@ impl WindowItem for InputText {
         self.focused && !self.password
     }
 
-    fn context_menu(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> Option<ContextMenuRequest> {
-        if !self.hit(draw_manager, &Pointer::new(x, y)) {
+    fn context_menu(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> Option<ContextMenuRequest> {
+        let (x, y) = (pointer.x, pointer.y);
+        if !self.hit(draw_manager, pointer) {
             return None;
         }
 

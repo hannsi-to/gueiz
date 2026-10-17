@@ -558,9 +558,9 @@ impl<T: NumberValue> WindowItem for Number<T> {
         self.input.resize(draw_manager, surface_size, design);
     }
 
-    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        let Some(spin) = self.spin_at(draw_manager, &Pointer::new(x, y)) else {
-            return self.input.mouse_left_pressed(draw_manager, x, y);
+    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let Some(spin) = self.spin_at(draw_manager, pointer) else {
+            return self.input.mouse_left_pressed(draw_manager, pointer);
         };
 
         // ブラウザと同じく、スピンボタンを押しても欄にフォーカスが移る。
@@ -573,15 +573,15 @@ impl<T: NumberValue> WindowItem for Number<T> {
         true
     }
 
-    fn mouse_left_released(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+    fn mouse_left_released(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
         let released_spin = self.pressed.is_some();
         if released_spin {
-            let hovered = self.spin_at(draw_manager, &Pointer::new(x, y));
+            let hovered = self.spin_at(draw_manager, pointer);
             self.set_spin_state(draw_manager, hovered, None);
             self.repeat_at = None;
         }
 
-        self.input.mouse_left_released(draw_manager, x, y) || released_spin
+        self.input.mouse_left_released(draw_manager, pointer) || released_spin
     }
 
     fn mouse_moved(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
@@ -592,10 +592,9 @@ impl<T: NumberValue> WindowItem for Number<T> {
         self.input.mouse_moved(draw_manager, pointer) || spin_changed
     }
 
-    fn mouse_wheel(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32, lines: [f32; 2]) -> bool {
+    fn mouse_wheel(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer, lines: [f32; 2]) -> bool {
         // ブラウザと同じく、フォーカスがあって欄の上にいるときだけ。
-        let pointer = Pointer::new(x, y);
-        let over = self.input.hit(draw_manager, &pointer) || self.spin_at(draw_manager, &pointer).is_some();
+        let over = self.input.hit(draw_manager, pointer) || self.spin_at(draw_manager, pointer).is_some();
         if !self.input.has_focus() || !over || lines[1] == 0.0 {
             return false;
         }
@@ -672,8 +671,8 @@ impl<T: NumberValue> WindowItem for Number<T> {
         false
     }
 
-    fn context_menu(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> Option<ContextMenuRequest> {
-        WindowItem::context_menu(&mut self.input, draw_manager, x, y)
+    fn context_menu(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> Option<ContextMenuRequest> {
+        WindowItem::context_menu(&mut self.input, draw_manager, pointer)
     }
 
     fn animate(&mut self, draw_manager: &mut DrawManager, resources: &Resources, now: Instant) -> Animation {

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::hash::Hash;
 use std::panic::panic_any;
 use std::sync::Arc;
@@ -71,6 +72,8 @@ pub struct WindowFrame {
     /// 字の形が増えるのは [`WindowFrame::create_object`] と組み直しのときだけなので、
     /// そこで [`WindowFrame::refresh_owned_names`] から作り直します。
     owned_names: Vec<String>,
+    /// `owned_names` と同じ名前を、[`WindowFrame::owns`] で引けるように。
+    owned_set: HashSet<String>,
     /// `owned_names` のうち、部品の図形が始まる位置。覆いを積むのはここから後ろ。
     item_names_start: usize,
     /// 名前を集め直したので、覆いが前と同じでも積み直す必要がある。
@@ -89,6 +92,11 @@ pub struct WindowFrame {
     context_menu: ContextMenu,
     /// 部品が次に動かしてほしい時刻（キャレットの点滅など）。
     next_update: Option<Instant>,
+    /// 重なり順の底上げ。この窓の図形すべての z に足す。
+    ///
+    /// 窓を何枚も重ねるとき、手前の窓ほど大きくします（[`GuiManager`](crate::gui::gui_manager::GuiManager) が決める）。
+    /// 部品は z を 0（ポップアップは 500、メニューは 1000）から決めるので、その上に足します。
+    depth: f32,
 }
 
 /// 図形に移し待ちの変更。
@@ -219,6 +227,7 @@ impl WindowFrame {
             window_items: Vec::new(),
             applied_clip: None,
             owned_names: Vec::new(),
+            owned_set: HashSet::new(),
             item_names_start: 0,
             clip_stale: true,
             pending: Pending::default(),
@@ -226,6 +235,7 @@ impl WindowFrame {
             title_layout_width: None,
             context_menu: ContextMenu::new(),
             next_update: None,
+            depth: 0.0,
         }
     }
 
@@ -754,7 +764,13 @@ impl WindowFrame {
     /// 窓の内側の取っ手は、**手前にあるものが自分のものの時だけ**取ります。
     /// 別の窓がかぶさっているなら、そちらの中身です。
     pub fn resize_handle_at(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<ResizeHandle> {
-        let [world_x, world_y] = self.to_world(draw_manager, x, y)?;
+        self.handle_at(draw_manager, &Pointer::new(x, y))
+    }
+
+    /// [`WindowFrame::resize_handle_at`] の中身。当てた結果を `pointer` に残すので、
+    /// 呼んだ側はそのまま部品に渡せる。
+    fn handle_at(&self, draw_manager: &DrawManager, pointer: &Pointer) -> Option<ResizeHandle> {
+        let [world_x, world_y] = self.to_world(draw_manager, pointer.x, pointer.y)?;
 
         let quad = &self.frame_quad;
         let (left, top) = (quad.x, quad.y);
@@ -800,11 +816,8 @@ impl WindowFrame {
                     (false, false) => ResizeHandle::BottomRight,
                 };
 
-                if distance < 0.0 {
-                    match draw_manager.pick(x, y) {
-                        Some(pick) if self.owns(&pick.name) => {}
-                        _ => return None,
-                    }
+                if distance < 0.0 && !self.in_front(draw_manager, pointer) {
+                    return None;
                 }
 
                 return Some(handle);
@@ -828,11 +841,8 @@ impl WindowFrame {
             _ => return None,
         };
 
-        if quad.hover(world_x, world_y) {
-            match draw_manager.pick(x, y) {
-                Some(pick) if self.owns(&pick.name) => {}
-                _ => return None,
-            }
+        if quad.hover(world_x, world_y) && !self.in_front(draw_manager, pointer) {
+            return None;
         }
 
         Some(handle)
@@ -977,14 +987,33 @@ impl WindowFrame {
             return false;
         }
 
+        // 新しく出てきた図形（打って増えた字の形など）は、部品が決めた z のまま登録されている。
+        // 窓の底上げをここで足す。前からある図形には足してあるので触らない。
+        if self.depth != 0.0 {
+            for name in names.iter().filter(|name| !self.owned_set.contains(name.as_str())) {
+                if let Some(object) = draw_manager.object_mut(name) {
+                    let z = object.depth();
+                    object.z(z + self.depth);
+                }
+            }
+        }
+
+        self.owned_set = names.iter().cloned().collect();
         self.owned_names = names;
         self.clip_stale = true;
         true
     }
 
     /// この窓の図形か。字の形と部品の図形も入ります。
+    ///
+    /// 指が動くたびに引くので、名前の並び（`owned_names`）をなめずに [`HashSet`] で引く。
     fn owns(&self, name: &str) -> bool {
-        self.owned_names.iter().any(|owned| owned == name)
+        self.owned_set.contains(name)
+    }
+
+    /// 指の下で一番手前にあるのが、この窓の図形か。当てるのは `pointer` につき 1 回だけ。
+    fn in_front(&self, draw_manager: &DrawManager, pointer: &Pointer) -> bool {
+        pointer.pick(draw_manager).is_some_and(|pick| self.owns(&pick.name))
     }
 
     /// 画素の位置を、図形を組んだ座標へ戻す。
@@ -1020,8 +1049,10 @@ impl WindowFrame {
         let Some(world) = self.to_world(draw_manager, x, y) else {
             return false;
         };
+        // 当てるのは、取っ手・窓・部品を通して 1 回だけ。
+        let pointer = Pointer::new(x, y);
 
-        if let Some(handle) = self.resize_handle_at(draw_manager, x, y) {
+        if let Some(handle) = self.handle_at(draw_manager, &pointer) {
             self.unfocus_items(draw_manager, None);
             self.resize = Some(Resize { handle, start_quad: self.frame_quad, start: world });
             return true;
@@ -1033,19 +1064,16 @@ impl WindowFrame {
             return false;
         }
         // 手前のものが自分の図形でなければ、別の窓がかぶさっている（A3）。
-        match draw_manager.pick(x, y) {
-            Some(pick) if self.owns(&pick.name) => {}
-            _ => {
-                self.unfocus_items(draw_manager, None);
-                return false;
-            }
+        if !self.in_front(draw_manager, &pointer) {
+            self.unfocus_items(draw_manager, None);
+            return false;
         }
 
         // 部品が先（A4）。取った部品があればそこで止める。
         let taken = self
             .window_items
             .iter_mut()
-            .position(|window_item| window_item.mouse_left_pressed(draw_manager, x, y));
+            .position(|window_item| window_item.mouse_left_pressed(draw_manager, &pointer));
 
         // 取った部品のほかは、フォーカスを手放す。
         self.unfocus_items(draw_manager, taken);
@@ -1070,6 +1098,12 @@ impl WindowFrame {
     /// - 縁の上なら、その取っ手の形。
     /// - 窓の中で手前がこの窓なら、指の下の部品に聞く。
     pub fn cursor_shape(&self, draw_manager: &DrawManager, x: f32, y: f32) -> CursorShape {
+        self.cursor_shape_at(draw_manager, &Pointer::new(x, y))
+    }
+
+    /// [`WindowFrame::cursor_shape`] の中身。窓を何枚も持つ側が、当てた結果を窓のあいだで使い回せるように。
+    pub(crate) fn cursor_shape_at(&self, draw_manager: &DrawManager, pointer: &Pointer) -> CursorShape {
+        let (x, y) = (pointer.x, pointer.y);
         if self.context_menu.contains(draw_manager, x, y) {
             return CursorShape::Default;
         }
@@ -1079,7 +1113,8 @@ impl WindowFrame {
         if self.drag.is_some() {
             return CursorShape::Move;
         }
-        if let Some(handle) = self.resize_handle_at(draw_manager, x, y) {
+        // 当てるのは、取っ手・窓・部品を通して 1 回だけ。
+        if let Some(handle) = self.handle_at(draw_manager, pointer) {
             return handle.cursor_shape();
         }
 
@@ -1087,18 +1122,81 @@ impl WindowFrame {
         if !self.to_world(draw_manager, x, y).is_some_and(|world| self.frame_quad.hover(world[0], world[1])) {
             return CursorShape::Default;
         }
-
-        // 当てるのはここで 1 回だけ。結果は部品にも使い回させる。
-        let pick = match draw_manager.pick(x, y) {
-            Some(pick) if self.owns(&pick.name) => pick,
-            _ => return CursorShape::Default,
-        };
-        let pointer = Pointer::with_pick(x, y, Some(pick));
+        if !self.in_front(draw_manager, pointer) {
+            return CursorShape::Default;
+        }
 
         self.window_items
             .iter()
-            .find_map(|window_item| window_item.cursor_shape(draw_manager, &pointer))
+            .find_map(|window_item| window_item.cursor_shape(draw_manager, pointer))
             .unwrap_or_default()
+    }
+
+    /// 指がこの窓の上か（開いているメニュー・縁の取っ手を含む）。上に別の窓が重なっていれば `false`。
+    ///
+    /// 掴んでいる・縁を引いているあいだは、指がどこにあっても `true`。
+    pub fn contains(&self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
+        self.contains_at(draw_manager, &Pointer::new(x, y))
+    }
+
+    /// [`WindowFrame::contains`] の中身。
+    pub(crate) fn contains_at(&self, draw_manager: &DrawManager, pointer: &Pointer) -> bool {
+        if self.drag.is_some() || self.resize.is_some() {
+            return true;
+        }
+        if self.context_menu.contains(draw_manager, pointer.x, pointer.y) {
+            return true;
+        }
+        if self.handle_at(draw_manager, pointer).is_some() {
+            return true;
+        }
+
+        self.to_world(draw_manager, pointer.x, pointer.y).is_some_and(|world| self.frame_quad.hover(world[0], world[1]))
+            && self.in_front(draw_manager, pointer)
+    }
+
+    // --- 重なり ---
+
+    /// 重なり順の底上げ。
+    pub fn depth(&self) -> f32 {
+        self.depth
+    }
+
+    /// 重なり順の底上げを変える。この窓の図形すべて（開くメニューも）の z を、差のぶんだけずらす。
+    ///
+    /// 窓を何枚も重ねるときに、手前の窓ほど大きくします。手前に出すたびに図形をすべてなめるので、
+    /// 指が動くたびには呼ばないでください。
+    pub fn set_depth(&mut self, draw_manager: &mut DrawManager, depth: f32) {
+        let delta = depth - self.depth;
+        if delta == 0.0 {
+            return;
+        }
+
+        for name in &self.owned_names {
+            if let Some(object) = draw_manager.object_mut(name) {
+                let z = object.depth();
+                object.z(z + delta);
+            }
+        }
+
+        self.depth = depth;
+        self.context_menu.set_depth(depth);
+    }
+
+    /// 部品のフォーカスを手放し、開いているメニューを閉じる。ほかの窓が押されたときに。
+    /// 見た目が変わったら `true`。
+    pub fn unfocus(&mut self, draw_manager: &mut DrawManager) -> bool {
+        let menu_open = self.context_menu.is_open();
+        if menu_open {
+            self.context_menu.close(draw_manager);
+        }
+
+        self.unfocus_items(draw_manager, None) || menu_open
+    }
+
+    /// 右クリックのメニューが開いているか。
+    pub fn is_context_menu_open(&self) -> bool {
+        self.context_menu.is_open()
     }
 
     /// `keep` の部品のほかは、フォーカスを手放させる。見た目が変わったら `true`。
@@ -1253,9 +1351,11 @@ impl WindowFrame {
         let resized = self.resize.take().is_some();
 
         // 押したまま外へ出た部品も戻せるよう、どこで放しても全部に渡す。
+        // 当てるのは、要った部品があったときに 1 回だけ。
+        let pointer = Pointer::new(x, y);
         let mut item_changed = false;
         for window_item in &mut self.window_items {
-            item_changed |= window_item.mouse_left_released(draw_manager, x, y);
+            item_changed |= window_item.mouse_left_released(draw_manager, &pointer);
         }
 
         dragged || resized || item_changed
@@ -1273,16 +1373,17 @@ impl WindowFrame {
         if !self.frame_quad.hover(world[0], world[1]) {
             return false;
         }
-        match draw_manager.pick(x, y) {
-            Some(pick) if self.owns(&pick.name) => {}
-            _ => return false,
+        // 当てるのはここで 1 回だけ。結果は部品にも使い回させる。
+        let pointer = Pointer::new(x, y);
+        if !self.in_front(draw_manager, &pointer) {
+            return false;
         }
 
         let opened = self
             .window_items
             .iter_mut()
             .enumerate()
-            .find_map(|(index, window_item)| window_item.context_menu(draw_manager, x, y).map(|request| (index, request)));
+            .find_map(|(index, window_item)| window_item.context_menu(draw_manager, &pointer).map(|request| (index, request)));
 
         if let Some((index, request)) = opened {
             self.unfocus_items(draw_manager, Some(index));
@@ -1306,14 +1407,15 @@ impl WindowFrame {
         if !self.frame_quad.hover(world[0], world[1]) {
             return false;
         }
-        match draw_manager.pick(x, y) {
-            Some(pick) if self.owns(&pick.name) => {}
-            _ => return false,
+        // 当てるのはここで 1 回だけ。結果は部品にも使い回させる。
+        let pointer = Pointer::new(x, y);
+        if !self.in_front(draw_manager, &pointer) {
+            return false;
         }
 
         self.window_items
             .iter_mut()
-            .any(|window_item| window_item.mouse_wheel(draw_manager, x, y, lines))
+            .any(|window_item| window_item.mouse_wheel(draw_manager, &pointer, lines))
     }
 
     pub fn mouse_right_released(&mut self) -> bool {
@@ -1331,6 +1433,12 @@ impl WindowFrame {
     /// 掴んでも引いてもいなければ、部品に渡します（指が上に来たら色を変えるなど）。
     /// 部品の見た目が変わったときも `true`。
     pub fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+        self.mouse_moved_at(draw_manager, &Pointer::new(x, y))
+    }
+
+    /// [`WindowFrame::mouse_moved`] の中身。窓を何枚も持つ側が、当てた結果を窓のあいだで使い回せるように。
+    pub(crate) fn mouse_moved_at(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let (x, y) = (pointer.x, pointer.y);
         // メニューが開いているあいだは、指の下の項目を光らせるだけ。
         if self.context_menu.is_open() {
             return self.context_menu.hover(draw_manager, x, y);
@@ -1342,10 +1450,9 @@ impl WindowFrame {
 
         let Some(drag) = self.drag.as_ref() else {
             // 当てるのは、どれかの部品が要ったときに 1 回だけ。
-            let pointer = Pointer::new(x, y);
             let mut item_changed = false;
             for window_item in &mut self.window_items {
-                item_changed |= window_item.mouse_moved(draw_manager, &pointer);
+                item_changed |= window_item.mouse_moved(draw_manager, pointer);
             }
 
             return item_changed;

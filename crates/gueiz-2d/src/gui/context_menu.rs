@@ -494,6 +494,8 @@ pub(crate) struct ContextMenu {
     state: ContextMenuState,
     /// 押された項目（メニューの番号・項目の番号）。窓が呼ぶ側の手で関数を呼ぶ。
     pending: Option<(usize, usize)>,
+    /// 窓の重なり順の底上げ。置くときに z へ足す。
+    depth: f32,
 }
 
 impl ContextMenu {
@@ -506,6 +508,7 @@ impl ContextMenu {
             stack: Vec::new(),
             state: ContextMenuState::default(),
             pending: None,
+            depth: 0.0,
         }
     }
 
@@ -763,6 +766,11 @@ impl ContextMenu {
         index
     }
 
+    /// 窓の重なり順の底上げを変える。次に置くときから効く（閉じているあいだは画面の外にある）。
+    pub(crate) fn set_depth(&mut self, depth: f32) {
+        self.depth = depth;
+    }
+
     pub(crate) fn is_open(&self) -> bool {
         !self.stack.is_empty()
     }
@@ -900,7 +908,7 @@ impl ContextMenu {
 
     fn translate(&self, draw_manager: &mut DrawManager, name: &str, [x, y]: [f32; 2], z: f32) {
         if let Some(object) = draw_manager.object_mut(name) {
-            object.translate(x, y, z);
+            object.translate(x, y, z + self.depth);
         }
     }
 

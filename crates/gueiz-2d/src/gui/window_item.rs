@@ -148,7 +148,9 @@ pub trait WindowItem {
     ///
     /// 取ったら、後ろの部品にも窓の帯にも渡りません。
     /// 見た目を変えるなら、ここで図形を書き換えて構いません。
-    fn mouse_left_pressed(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
+    ///
+    /// `pointer` は窓がもう当ててあるので、[`Pointer::pick`] は何度呼んでも当て直しません。
+    fn mouse_left_pressed(&mut self, _draw_manager: &mut DrawManager, _pointer: &Pointer) -> bool {
         false
     }
 
@@ -158,7 +160,9 @@ pub trait WindowItem {
 
     /// 左を放した。**どこで放しても、すべての部品に届きます**（押したまま外へ出たのを戻せるように）。
     /// 何か変わったら `true`。
-    fn mouse_left_released(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
+    ///
+    /// すべての部品に同じ `pointer` が渡ります（当てるのは、要った部品があったときに 1 回だけ）。
+    fn mouse_left_released(&mut self, _draw_manager: &mut DrawManager, _pointer: &Pointer) -> bool {
         false
     }
 
@@ -177,7 +181,9 @@ pub trait WindowItem {
 
     /// ホイールが回った。窓の中で、手前がこの窓のときだけ届きます。
     /// `lines` は回した行数 `[横, 縦]` で、正なら左・上へ（中身を右・下へ）送る。**取ったら `true`。**
-    fn mouse_wheel(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32, _lines: [f32; 2]) -> bool {
+    ///
+    /// `pointer` は窓がもう当ててあります。
+    fn mouse_wheel(&mut self, _draw_manager: &mut DrawManager, _pointer: &Pointer, _lines: [f32; 2]) -> bool {
         false
     }
 
@@ -241,7 +247,9 @@ pub trait WindowItem {
     }
 
     /// 右クリックされた。この部品の上なら、どのメニューをどんなようすで開くかを返す（窓が開く）。
-    fn context_menu(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> Option<ContextMenuRequest> {
+    ///
+    /// `pointer` は窓がもう当ててあります。
+    fn context_menu(&mut self, _draw_manager: &mut DrawManager, _pointer: &Pointer) -> Option<ContextMenuRequest> {
         None
     }
 

@@ -547,8 +547,8 @@ impl WindowItem for CheckBox {
         names
     }
 
-    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        let Some(index) = self.hit(draw_manager, &Pointer::new(x, y)) else {
+    fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let Some(index) = self.hit(draw_manager, pointer) else {
             return false;
         };
 
@@ -556,12 +556,12 @@ impl WindowItem for CheckBox {
         true
     }
 
-    fn mouse_left_released(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+    fn mouse_left_released(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
         let Some(armed) = self.armed.take() else {
             return false;
         };
 
-        if self.hit(draw_manager, &Pointer::new(x, y)) != Some(armed) {
+        if self.hit(draw_manager, pointer) != Some(armed) {
             return false;
         }
 
