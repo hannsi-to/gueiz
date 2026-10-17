@@ -3,7 +3,7 @@ use gueiz_gpu::vertex::Vertex;
 use crate::draw_manager::DrawManager;
 use crate::font::Font;
 use crate::gui::window_frame::{Gap, QuadType, ThemeColor};
-use crate::gui::window_item::{replace_outline, CursorShape, WindowItem, WindowItemArguments1, WindowItemArguments2};
+use crate::gui::window_item::{built_point, replace_outline, within, CursorShape, Pointer, WindowItem, WindowItemArguments1, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
 use crate::objects::polygon_rounded::CornerType;
@@ -101,11 +101,17 @@ impl Button {
         }
     }
 
-    /// 地の四角を組む。組み直しで頂点だけが欲しいときは、名前に `""` を渡します。
-    fn build_background(&self, name: &str) -> Object {
+    /// 地の四角の左上と右下（組んだときの座標）。
+    fn bounds(&self) -> [f32; 4] {
         let [x, y] = self.built_at;
         let (left, top) = (x + self.gap.x, y + self.gap.y);
-        let (right, bottom) = (left + self.width, top + self.height);
+
+        [left, top, left + self.width, top + self.height]
+    }
+
+    /// 地の四角を組む。組み直しで頂点だけが欲しいときは、名前に `""` を渡します。
+    fn build_background(&self, name: &str) -> Object {
+        let [left, top, right, bottom] = self.bounds();
 
         let color = self.fill_color();
         let vertex = |x: f32, y: f32| Vertex::new_position_color(x, y, 0.0, color.r, color.g, color.b, color.a);
@@ -160,8 +166,18 @@ impl Button {
     /// 位置で比べず [`DrawManager::pick`] に聞くのは、窓のずらしやカメラを
     /// 通した当たり判定をそのまま使えるのと、別の窓がかぶさっているときに
     /// 反応しないようにするため。
-    fn hit(&self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
-        let Some(pick) = draw_manager.pick(x, y) else {
+    ///
+    /// ただし `pick` は全図形をなめるので重い。指が動くたびに呼ばれるので、
+    /// 地の四角の外なら座標だけで断る。字は四角のまん中に置くので、はみ出すのは
+    /// 幅が足りないときだけ。はみ出したぶんの字は押せない。
+    fn hit(&self, draw_manager: &DrawManager, pointer: &Pointer) -> bool {
+        let inside = built_point(draw_manager, self.button_register_name.background.as_deref(), pointer.x, pointer.y)
+            .is_some_and(|point| within(self.bounds(), 0.0, point));
+        if !inside {
+            return false;
+        }
+
+        let Some(pick) = pointer.pick(draw_manager) else {
             return false;
         };
 
@@ -265,7 +281,7 @@ impl WindowItem for Button {
     }
 
     fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        if !self.hit(draw_manager, x, y) {
+        if !self.hit(draw_manager, &Pointer::new(x, y)) {
             return false;
         }
 
@@ -278,7 +294,7 @@ impl WindowItem for Button {
             return false;
         }
 
-        let hovered = self.hit(draw_manager, x, y);
+        let hovered = self.hit(draw_manager, &Pointer::new(x, y));
         self.set_state(draw_manager, hovered, false);
 
         if hovered {
@@ -290,12 +306,12 @@ impl WindowItem for Button {
         true
     }
 
-    fn cursor_shape(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<CursorShape> {
-        self.hit(draw_manager, x, y).then_some(CursorShape::Pointer)
+    fn cursor_shape(&self, draw_manager: &DrawManager, pointer: &Pointer) -> Option<CursorShape> {
+        self.hit(draw_manager, pointer).then_some(CursorShape::Pointer)
     }
 
-    fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        let hovered = self.hit(draw_manager, x, y);
+    fn mouse_moved(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let hovered = self.hit(draw_manager, pointer);
         let armed = self.armed;
 
         self.set_state(draw_manager, hovered, armed)

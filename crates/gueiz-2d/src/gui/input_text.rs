@@ -7,7 +7,7 @@ use crate::effect::Block;
 use crate::gui::window_frame::{Gap, QuadType, ThemeColor};
 use crate::gui::text_edit::TextEdit;
 use crate::gui::context_menu::{ContextMenuRequest, ContextMenuState, INPUT_TEXT_CONTEXT_MENU};
-use crate::gui::window_item::{replace_outline, Animation, CursorShape, EditKey, KeyModifiers, WindowItem, WindowItemArguments1, WindowItemArguments2};
+use crate::gui::window_item::{built_point, replace_outline, within, Animation, CursorShape, EditKey, KeyModifiers, Pointer, WindowItem, WindowItemArguments1, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
 use crate::objects::polygon_rounded::CornerType;
@@ -76,6 +76,8 @@ pub struct InputText {
     height: f32,
     /// 左右の内側の余白。
     padding: f32,
+    /// 右端に取っておく幅。字はこの手前までに出す（数値欄のスピンボタンの場所）。
+    reserved_right: f32,
     quad_type: QuadType,
     gap: Gap,
     input_text_font: InputTextFont,
@@ -146,6 +148,7 @@ pub struct InputTextFont {
     pub base_font_size: f32,
 }
 
+#[derive(Debug, Copy, Clone)]
 pub struct InputTextTheme {
     pub fill_color: ThemeColor,
     pub outline_color: ThemeColor,
@@ -166,6 +169,7 @@ impl InputText {
             width,
             height,
             padding,
+            reserved_right: 0.0,
             quad_type,
             gap,
             input_text_font,
@@ -238,10 +242,54 @@ impl InputText {
         self.edit.text()
     }
 
+    // --- 数値欄から使う ---
+
+    /// 右端に `width` を取っておく。字・選択の帯・キャレットはこの手前までに出す。
+    pub(crate) fn reserve_right(mut self, width: f32) -> Self {
+        self.reserved_right = width;
+        self
+    }
+
+    /// 文字を丸ごと差し替える（1 回で元に戻せる）。字は並べ直さないので、
+    /// 組んだ後なら [`InputText::refresh`] を呼ぶ。変わったら `true`。
+    pub(crate) fn replace_text(&mut self, text: &str) -> bool {
+        if self.edit.text() == text {
+            return false;
+        }
+
+        self.edit.select_all();
+        self.edit.paste(text);
+        self.edit.move_end(false);
+        true
+    }
+
+    /// 字を並べ直し、縁取りとキャレットも組み直す。
+    pub(crate) fn refresh(&mut self, draw_manager: &mut DrawManager, resources: &Resources) -> bool {
+        self.reset_blink();
+        self.relayout(draw_manager, resources)
+    }
+
+    /// フォーカスを取る（スピンボタンを押したときなど）。
+    pub(crate) fn focus(&mut self, draw_manager: &mut DrawManager) {
+        self.focused = true;
+        self.reset_blink();
+        self.refresh_shapes(draw_manager);
+    }
+
+    /// IME で変換中か。
+    pub(crate) fn composing(&self) -> bool {
+        !self.preedit.is_empty()
+    }
+
     // --- 形 ---
 
+    /// 字を出せる幅（左右の余白と、右に取っておく幅を除く）。
+    fn inner_width(&self) -> f32 {
+        (self.width - self.padding * 2.0 - self.reserved_right).max(0.0)
+    }
+
     /// 欄の左上と右下（組んだときの座標）。
-    fn bounds(&self) -> [f32; 4] {
+    pub(crate) fn bounds(&self) -> [f32; 4] {
         let [x, y] = self.built_at;
         let (left, top) = (x + self.gap.x, y + self.gap.y);
 
@@ -293,6 +341,7 @@ impl InputText {
     fn build_caret(&self, name: &str) -> Object {
         let [x, y, width, height] = self.caret_area_local();
         let [left, _, right, _] = self.bounds();
+        let right = right - self.reserved_right;
         let inset = self.padding * 0.5;
         let inside = x >= left + inset && x + width <= right - inset;
 
@@ -316,6 +365,7 @@ impl InputText {
     /// 欄の内側からはみ出さないよう、端で切ります（字と違って覆いを掛けないので）。
     fn build_selection(&self, name: &str) -> Object {
         let [left, _, right, _] = self.bounds();
+        let right = right - self.reserved_right;
         let inset = self.padding * 0.5;
         let [_, top, _, height] = self.caret_area_local();
 
@@ -472,7 +522,7 @@ impl InputText {
         }
 
         // 縦棒が欄の内側に来るように、横のずらしを決める。
-        let inner_width = (self.width - self.padding * 2.0).max(0.0);
+        let inner_width = self.inner_width();
         let caret_x = self.caret_x();
         let total = self.stops.last().map_or(0.0, |(_, x)| *x);
 
@@ -510,7 +560,7 @@ impl InputText {
 
         // 見えている範囲。端で字が途切れないよう、字の大きさ 2 つぶん広く取る。
         let margin = self.input_text_font.base_font_size * 2.0;
-        let inner_width = (self.width - self.padding * 2.0).max(0.0);
+        let inner_width = self.inner_width();
         let (left, right) = (self.scroll - margin, self.scroll + inner_width + margin);
 
         // 境目は左から順に並んでいるので、二分探索で範囲を出す。
@@ -551,6 +601,7 @@ impl InputText {
         };
 
         let [left, top, right, bottom] = self.bounds();
+        let right = right - self.reserved_right;
         let inset = self.padding * 0.5;
         let [x, y] = self.offset;
         let block = Block::ClipRect {
@@ -599,9 +650,24 @@ impl InputText {
         count
     }
 
+    /// 指が欄の枠（縁取りの太さを含む）の中か。組んだときの座標で見るので、上に別の窓が
+    /// 重なっていても `true` になる。[`InputText::hit`] の前置きと、右に取っておいた幅に
+    /// 置くもの（数の欄のスピンボタン）の前置きに使う。
+    pub(crate) fn inside(&self, draw_manager: &DrawManager, pointer: &Pointer) -> bool {
+        built_point(draw_manager, self.input_text_register_name.background.as_deref(), pointer.x, pointer.y)
+            .is_some_and(|point| within(self.bounds(), OUTLINE_WIDTH, point))
+    }
+
     /// 指の下で一番手前にあるのが、この欄の図形か。
-    fn hit(&self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
-        let Some(pick) = draw_manager.pick(x, y) else {
+    ///
+    /// [`DrawManager::pick`] は全図形をなめるので重い。指が動くたびに呼ばれるので、
+    /// 枠の外なら座標だけで断る。欄の外へ送られて見えていない字にも当たらなくなる。
+    pub(crate) fn hit(&self, draw_manager: &DrawManager, pointer: &Pointer) -> bool {
+        if !self.inside(draw_manager, pointer) {
+            return false;
+        }
+
+        let Some(pick) = pointer.pick(draw_manager) else {
             return false;
         };
 
@@ -652,7 +718,7 @@ impl InputText {
         };
 
         let [left, _, right, _] = self.bounds();
-        let (inner_left, inner_right) = (left + self.padding, right - self.padding);
+        let (inner_left, inner_right) = (left + self.padding, right - self.reserved_right - self.padding);
         let over = if pointer < inner_left {
             pointer - inner_left
         } else if pointer > inner_right {
@@ -671,7 +737,7 @@ impl InputText {
         self.last_auto_scroll = Some(now);
 
         let total = self.stops.last().map_or(0.0, |(_, x)| *x);
-        let inner_width = (self.width - self.padding * 2.0).max(0.0);
+        let inner_width = self.inner_width();
         let max_scroll = (total - inner_width).max(0.0);
         let speed = AUTO_SCROLL_SPEED + over.abs() * AUTO_SCROLL_SPEED_PER_DISTANCE;
         let scroll = (self.scroll + over.signum() * speed * elapsed).clamp(0.0, max_scroll);
@@ -780,7 +846,7 @@ impl WindowItem for InputText {
     }
 
     fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        if !self.hit(draw_manager, x, y) {
+        if !self.hit(draw_manager, &Pointer::new(x, y)) {
             return false;
         }
 
@@ -814,7 +880,8 @@ impl WindowItem for InputText {
         std::mem::take(&mut self.dragging)
     }
 
-    fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+    fn mouse_moved(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let (x, y) = (pointer.x, pointer.y);
         if !self.dragging {
             return false;
         }
@@ -823,7 +890,7 @@ impl WindowItem for InputText {
         // 指の下の字まで一気に選ぶと、横の送りが追いつかず、キャレットが欄の外に出てしまう。
         self.drag_pointer = self.local_x(draw_manager, x, y);
         let [left, _, right, _] = self.bounds();
-        let (inner_left, inner_right) = (left + self.padding, right - self.padding);
+        let (inner_left, inner_right) = (left + self.padding, right - self.reserved_right - self.padding);
         let Some(index) = self.drag_pointer.map(|pointer| self.index_at_local(pointer.clamp(inner_left, inner_right))) else {
             return false;
         };
@@ -871,7 +938,7 @@ impl WindowItem for InputText {
     }
 
     fn context_menu(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> Option<ContextMenuRequest> {
-        if !self.hit(draw_manager, x, y) {
+        if !self.hit(draw_manager, &Pointer::new(x, y)) {
             return None;
         }
 
@@ -1040,8 +1107,8 @@ impl WindowItem for InputText {
         self.focused.then(|| self.caret_area_local())
     }
 
-    fn cursor_shape(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<CursorShape> {
-        self.hit(draw_manager, x, y).then_some(CursorShape::Text)
+    fn cursor_shape(&self, draw_manager: &DrawManager, pointer: &Pointer) -> Option<CursorShape> {
+        self.hit(draw_manager, pointer).then_some(CursorShape::Text)
     }
 }
 

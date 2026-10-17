@@ -10,7 +10,7 @@ use crate::gui::context_menu::{ContextMenuRequest, ContextMenuState, INPUT_TEXT_
 use crate::gui::input_text::{measure_stops, InputTextFont, InputTextTheme};
 use crate::gui::text_edit::TextEdit;
 use crate::gui::window_frame::{Gap, QuadType, ThemeColor};
-use crate::gui::window_item::{replace_outline, Animation, CursorShape, EditKey, KeyModifiers, WindowItem, WindowItemArguments1, WindowItemArguments2};
+use crate::gui::window_item::{replace_outline, within, Animation, CursorShape, EditKey, KeyModifiers, Pointer, WindowItem, WindowItemArguments1, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
 use crate::objects::polygon_rounded::CornerType;
@@ -807,8 +807,18 @@ impl InputTextarea {
     }
 
     /// 指の下で一番手前にあるのが、この欄の図形か。
-    fn hit(&self, draw_manager: &DrawManager, x: f32, y: f32) -> bool {
-        let Some(pick) = draw_manager.pick(x, y) else {
+    ///
+    /// [`DrawManager::pick`] は全図形をなめるので重い。指が動くたびに呼ばれるので、
+    /// 枠（縁取りの太さを含む）の外なら座標だけで断る。欄の外へ送られて見えていない字にも当たらなくなる。
+    fn hit(&self, draw_manager: &DrawManager, pointer: &Pointer) -> bool {
+        let inside = self
+            .local_point(draw_manager, pointer.x, pointer.y)
+            .is_some_and(|point| within(self.bounds(), OUTLINE_WIDTH, point));
+        if !inside {
+            return false;
+        }
+
+        let Some(pick) = pointer.pick(draw_manager) else {
             return false;
         };
 
@@ -1055,7 +1065,7 @@ impl WindowItem for InputTextarea {
     }
 
     fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        if !self.hit(draw_manager, x, y) {
+        if !self.hit(draw_manager, &Pointer::new(x, y)) {
             return false;
         }
 
@@ -1103,7 +1113,8 @@ impl WindowItem for InputTextarea {
         std::mem::take(&mut self.dragging)
     }
 
-    fn mouse_moved(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
+    fn mouse_moved(&mut self, draw_manager: &mut DrawManager, pointer: &Pointer) -> bool {
+        let (x, y) = (pointer.x, pointer.y);
         // つまみを引いている。指に合わせて送る（字を置き直すので animate で反映する）。
         if let Some(grab) = self.scrollbar_drag {
             let Some([_, pointer_y]) = self.local_point(draw_manager, x, y) else {
@@ -1141,7 +1152,7 @@ impl WindowItem for InputTextarea {
     }
 
     fn mouse_wheel(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32, [lines_x, lines_y]: [f32; 2]) -> bool {
-        if !self.hit(draw_manager, x, y) {
+        if !self.hit(draw_manager, &Pointer::new(x, y)) {
             return false;
         }
 
@@ -1178,7 +1189,7 @@ impl WindowItem for InputTextarea {
     }
 
     fn context_menu(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> Option<ContextMenuRequest> {
-        if !self.hit(draw_manager, x, y) {
+        if !self.hit(draw_manager, &Pointer::new(x, y)) {
             return None;
         }
 
@@ -1378,8 +1389,9 @@ impl WindowItem for InputTextarea {
         self.focused.then(|| self.caret_area_local())
     }
 
-    fn cursor_shape(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<CursorShape> {
-        if !self.hit(draw_manager, x, y) {
+    fn cursor_shape(&self, draw_manager: &DrawManager, pointer: &Pointer) -> Option<CursorShape> {
+        let (x, y) = (pointer.x, pointer.y);
+        if !self.hit(draw_manager, pointer) {
             return None;
         }
 

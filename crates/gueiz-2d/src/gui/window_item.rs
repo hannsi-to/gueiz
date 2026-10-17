@@ -1,10 +1,63 @@
+use std::cell::OnceCell;
 use std::time::Instant;
 use gueiz_gpu::camera::ScaleMode;
 use gueiz_gpu::renderer::SurfaceSize;
-use crate::draw_manager::DrawManager;
+use crate::draw_manager::{DrawManager, Pick};
 use crate::gui::context_menu::ContextMenuRequest;
 use crate::object::Object;
 use crate::resource::Resources;
+
+/// 指の位置と、その下で一番手前にある図形。
+///
+/// [`DrawManager::pick`] は全図形を手前から当てるので重い。窓は指が動くたびに、部品へ順に
+/// [`WindowItem::mouse_moved`] と [`WindowItem::cursor_shape`] を聞きます。部品がめいめい当てると
+/// 部品の数だけ全図形をなめ直すことになるので、**最初に要ったときの 1 回だけ当てて覚えておきます。**
+///
+/// 部品は、先に自分の枠の中かを座標で見てから [`Pointer::pick`] を呼んでください
+/// （[`built_point`] と [`within`]）。枠の外なら当てずに済みます。
+///
+/// 覚えた結果は 1 回の出来事のあいだだけ使います。部品が図形を書き換えても当て直さないので、
+/// 指の下の重なりを変えるような書き換え（図形を動かす・足す）の後に使い回さないでください。
+/// 色を塗り替えるくらいなら当たりは変わりません。
+pub struct Pointer {
+    /// 画素の位置。
+    pub x: f32,
+    pub y: f32,
+    picked: OnceCell<Option<Pick>>,
+}
+
+impl Pointer {
+    /// まだ当てていない指。
+    pub fn new(x: f32, y: f32) -> Self {
+        Self { x, y, picked: OnceCell::new() }
+    }
+
+    /// もう当ててある指。窓が自分で当てた結果を、部品に使い回させる。
+    pub fn with_pick(x: f32, y: f32, pick: Option<Pick>) -> Self {
+        Self { x, y, picked: OnceCell::from(pick) }
+    }
+
+    /// 指の下で一番手前にある図形。初めて聞かれたときだけ [`DrawManager::pick`] で当てる。
+    pub fn pick(&self, draw_manager: &DrawManager) -> Option<&Pick> {
+        self.picked.get_or_init(|| draw_manager.pick(self.x, self.y)).as_ref()
+    }
+}
+
+/// 画素の位置を、`name` の図形を組んだときの座標へ。窓のずれもここで外れる。
+///
+/// 部品は窓を組んだときの座標で形を組み、窓を動かしたぶんは複製のずらしで掛かっているので、
+/// 1 つめの複製の座標へ戻せば、組んだときの枠とそのまま比べられます。
+pub(crate) fn built_point(draw_manager: &DrawManager, name: Option<&str>, x: f32, y: f32) -> Option<[f32; 2]> {
+    let object = draw_manager.object(name?)?;
+    let [world_x, world_y] = object.view_camera().screen_to_world(x, y)?;
+
+    object.to_local(0, world_x, world_y)
+}
+
+/// `point` が枠 `[左, 上, 右, 下]` を `margin` だけ広げた中にあるか。
+pub(crate) fn within([left, top, right, bottom]: [f32; 4], margin: f32, [x, y]: [f32; 2]) -> bool {
+    x >= left - margin && x <= right + margin && y >= top - margin && y <= bottom + margin
+}
 
 /// 組み直した形の頂点を、登録済みの図形に入れ直す。
 ///
@@ -115,7 +168,10 @@ pub trait WindowItem {
 
     /// 指が動いた。窓を掴んでいる・縁を引いているあいだは届きません。
     /// 見た目が変わったら `true`（呼ぶ側が描き直します）。
-    fn mouse_moved(&mut self, _draw_manager: &mut DrawManager, _x: f32, _y: f32) -> bool {
+    ///
+    /// すべての部品に同じ `pointer` が渡ります。当たりは [`Pointer::pick`] で聞いてください
+    /// （全部品で 1 回しか当てません）。
+    fn mouse_moved(&mut self, _draw_manager: &mut DrawManager, _pointer: &Pointer) -> bool {
         false
     }
 
@@ -199,8 +255,9 @@ pub trait WindowItem {
 
     /// その画素の位置で出したい指の形。この部品の上でなければ `None`。
     ///
-    /// 窓の中で、手前がこの窓のときだけ聞かれます。
-    fn cursor_shape(&self, _draw_manager: &DrawManager, _x: f32, _y: f32) -> Option<CursorShape> {
+    /// 窓の中で、手前がこの窓のときだけ聞かれます。`pointer` は窓がもう当ててあるので、
+    /// [`Pointer::pick`] は何度呼んでも当て直しません。
+    fn cursor_shape(&self, _draw_manager: &DrawManager, _pointer: &Pointer) -> Option<CursorShape> {
         None
     }
 }

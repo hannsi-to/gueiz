@@ -5,7 +5,7 @@ use crate::draw_manager::DrawManager;
 use crate::gui::check_box::Axis;
 use crate::font::Font;
 use crate::gui::window_frame::{Gap, ThemeColor};
-use crate::gui::window_item::{replace_outline, CursorShape, WindowItem, WindowItemArguments1, WindowItemArguments2};
+use crate::gui::window_item::{built_point, replace_outline, within, CursorShape, Pointer, WindowItem, WindowItemArguments1, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
 use crate::objects::circle::Circle;
@@ -339,8 +339,23 @@ impl Radio {
     /// 位置で比べず [`DrawManager::pick`] に聞くのは、窓のずらしやカメラを
     /// 通した当たり判定をそのまま使えるのと、別の窓がかぶさっているときに
     /// 反応しないようにするため。
-    fn hit(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<usize> {
-        let pick = draw_manager.pick(x, y)?;
+    ///
+    /// ただし `pick` は全図形をなめるので重い。指が動くたびに呼ばれるので、
+    /// どの選択肢の当たり（丸と字を囲む四角に、縁の太さを足したもの）にも入っていなければ、座標だけで断る。
+    fn hit(&self, draw_manager: &DrawManager, pointer: &Pointer) -> Option<usize> {
+        let first = self.items.first()?.register_name.hit_area.as_deref();
+        let point = built_point(draw_manager, first, pointer.x, pointer.y)?;
+        let inside = self.items.iter().any(|item| {
+            let [x, y] = item.built_at;
+            let [width, height] = item.hit_size;
+
+            within([x, y, x + width, y + height], OUTLINE_WIDTH, point)
+        });
+        if !inside {
+            return None;
+        }
+
+        let pick = pointer.pick(draw_manager)?;
 
         self.items.iter().position(|item| {
             let names = &item.register_name;
@@ -550,7 +565,7 @@ impl WindowItem for Radio {
     }
 
     fn mouse_left_pressed(&mut self, draw_manager: &mut DrawManager, x: f32, y: f32) -> bool {
-        let Some(index) = self.hit(draw_manager, x, y) else {
+        let Some(index) = self.hit(draw_manager, &Pointer::new(x, y)) else {
             return false;
         };
 
@@ -563,7 +578,7 @@ impl WindowItem for Radio {
             return false;
         };
 
-        if self.hit(draw_manager, x, y) != Some(armed) {
+        if self.hit(draw_manager, &Pointer::new(x, y)) != Some(armed) {
             return false;
         }
 
@@ -571,7 +586,7 @@ impl WindowItem for Radio {
         true
     }
 
-    fn cursor_shape(&self, draw_manager: &DrawManager, x: f32, y: f32) -> Option<CursorShape> {
-        self.hit(draw_manager, x, y).map(|_| CursorShape::Pointer)
+    fn cursor_shape(&self, draw_manager: &DrawManager, pointer: &Pointer) -> Option<CursorShape> {
+        self.hit(draw_manager, pointer).map(|_| CursorShape::Pointer)
     }
 }

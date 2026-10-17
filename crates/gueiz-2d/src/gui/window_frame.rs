@@ -15,7 +15,7 @@ use crate::draw_manager::DrawManager;
 use std::time::Instant;
 use crate::gui::clipboard::Clipboard;
 use crate::gui::context_menu::{ContextMenu, ContextMenuEvent, ContextMenuFont, ContextMenuLabels, ContextMenuLayout, ContextMenuStyle, ContextMenuTheme, INPUT_TEXT_CONTEXT_MENU};
-use crate::gui::window_item::{replace_outline, CursorShape, EditKey, KeyModifiers, WindowItemArguments1, WindowItem, WindowItemArguments2};
+use crate::gui::window_item::{replace_outline, CursorShape, EditKey, KeyModifiers, Pointer, WindowItemArguments1, WindowItem, WindowItemArguments2};
 use crate::instance::create_instance;
 use crate::object::Object;
 use crate::resource::{FontHandle, Resources};
@@ -886,7 +886,9 @@ impl WindowFrame {
 
         for name in &self.owned_names {
             if let Some(object) = draw_manager.object_mut(name) {
-                object.translate(x, y, 0.0);
+                // 重なり順（z）は部品が決めたものを残す（カラーピッカーのパレットのように、手前へ開くものがある）。
+                let z = object.depth();
+                object.translate(x, y, z);
             }
         }
 
@@ -1081,14 +1083,21 @@ impl WindowFrame {
             return handle.cursor_shape();
         }
 
-        match draw_manager.pick(x, y) {
-            Some(pick) if self.owns(&pick.name) => {}
-            _ => return CursorShape::Default,
+        // 窓の外なら当てるまでもない。pick は全図形をなめるので、指が動くたびには避けたい。
+        if !self.to_world(draw_manager, x, y).is_some_and(|world| self.frame_quad.hover(world[0], world[1])) {
+            return CursorShape::Default;
         }
+
+        // 当てるのはここで 1 回だけ。結果は部品にも使い回させる。
+        let pick = match draw_manager.pick(x, y) {
+            Some(pick) if self.owns(&pick.name) => pick,
+            _ => return CursorShape::Default,
+        };
+        let pointer = Pointer::with_pick(x, y, Some(pick));
 
         self.window_items
             .iter()
-            .find_map(|window_item| window_item.cursor_shape(draw_manager, x, y))
+            .find_map(|window_item| window_item.cursor_shape(draw_manager, &pointer))
             .unwrap_or_default()
     }
 
@@ -1332,9 +1341,11 @@ impl WindowFrame {
         }
 
         let Some(drag) = self.drag.as_ref() else {
+            // 当てるのは、どれかの部品が要ったときに 1 回だけ。
+            let pointer = Pointer::new(x, y);
             let mut item_changed = false;
             for window_item in &mut self.window_items {
-                item_changed |= window_item.mouse_moved(draw_manager, x, y);
+                item_changed |= window_item.mouse_moved(draw_manager, &pointer);
             }
 
             return item_changed;

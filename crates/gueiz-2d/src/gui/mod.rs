@@ -10,3 +10,7 @@ pub mod context_menu;
 pub mod clipboard;
 pub mod check_box;
 pub mod radio;
+pub mod number;
+pub mod range;
+pub mod color;
+pub mod dropdown;

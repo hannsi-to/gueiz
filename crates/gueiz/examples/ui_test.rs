@@ -12,12 +12,16 @@ use gueiz::winit_gui::WinitGui;
 use gueiz_2d::draw_manager::{DrawManager, DrawManagerDescriptor};
 use gueiz_2d::gui::button::{Button, ButtonFont, ButtonTheme};
 use gueiz_2d::gui::check_box::{Axis, CheckBox, CheckBoxFont, CheckBoxShape, CheckBoxTheme};
+use gueiz_2d::gui::color::{Color, ColorFont, ColorTheme, Rgba};
+use gueiz_2d::gui::dropdown::{Dropdown, DropdownFont, DropdownTheme};
 use gueiz_2d::gui::radio::{Radio, RadioFont, RadioShape, RadioTheme};
 use gueiz_2d::gui::context_menu::{ContextMenuFont, ContextMenuLabel, ContextMenuLabels, ContextMenuLayout, ContextMenuSlicer, ContextMenuStyle, ContextMenuTheme, INPUT_TEXT_CONTEXT_MENU};
 use gueiz_2d::gui::image_label::{ImageLabel, ImageLabelTexture, ImageLabelTheme};
 use gueiz_2d::gui::input_text::{InputText, InputTextFont, InputTextTheme};
 use gueiz_2d::gui::input_textarea::InputTextarea;
 use gueiz_2d::gui::label::{Label, LabelFont, LabelTheme};
+use gueiz_2d::gui::number::{Number, NumberFont, NumberTheme};
+use gueiz_2d::gui::range::{Range, RangeTheme};
 use gueiz_2d::gui::window_frame::{Gap, Quad, QuadType, ThemeColor, WindowFont, WindowFrame, WindowTheme};
 use gueiz_2d::resource::Resources;
 
@@ -323,6 +327,91 @@ impl Scene {
                 )
             )
         );
+        // パレットは下の部品の上に重なって開く。窓に収まるよう、いちばん上のほうに置く。
+        window_frame.add_window_item(Box::new(
+            Color::new(
+                "ColorObject1".to_string(),
+                60.0,
+                28.0,
+                Gap {
+                    x: 0.0,
+                    y: 5.0,
+                },
+                ColorFont {
+                    base_font: font_handle,
+                    base_font_size: 13.0,
+                },
+                ColorTheme {
+                    swatch_outline_color: ThemeColor {
+                        r: 0.35,
+                        g: 0.35,
+                        b: 0.38,
+                        a: 1.0,
+                    },
+                    focus_outline_color: ThemeColor {
+                        r: 0.36,
+                        g: 0.56,
+                        b: 0.92,
+                        a: 1.0,
+                    },
+                    panel_fill_color: ThemeColor {
+                        r: 0.12,
+                        g: 0.12,
+                        b: 0.14,
+                        a: 1.0,
+                    },
+                    panel_outline_color: ThemeColor {
+                        r: 0.35,
+                        g: 0.35,
+                        b: 0.38,
+                        a: 1.0,
+                    },
+                    marker_color: ThemeColor {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    marker_shadow_color: ThemeColor {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.6,
+                    },
+                    field_fill_color: ThemeColor {
+                        r: 0.06,
+                        g: 0.06,
+                        b: 0.07,
+                        a: 1.0,
+                    },
+                    field_outline_color: ThemeColor {
+                        r: 0.35,
+                        g: 0.35,
+                        b: 0.38,
+                        a: 1.0,
+                    },
+                    label_color: ThemeColor {
+                        r: 0.65,
+                        g: 0.65,
+                        b: 0.68,
+                        a: 1.0,
+                    },
+                    text_color: ThemeColor {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                },
+            )
+            .value(Rgba::from_hex("#4a90e2").unwrap_or_default())
+            .on_input(move |value| {
+                log::info!("the color was picked: {}", value.to_hex());
+            })
+            .on_change(move |value| {
+                log::info!("the color was changed: {}", value.to_hex());
+            }),
+        ));
         let mut click_count = 0;
         window_frame.add_window_item(
             Box::new(
@@ -373,6 +462,90 @@ impl Scene {
                 })
             )
         );
+        // 一覧は下の部品の上に重なって開く。窓に収まるよう、見せる行を 5 行にする。
+        window_frame.add_window_item(Box::new(
+            Dropdown::new(
+                "DropdownObject1".to_string(),
+                200.0,
+                28.0,
+                QuadType::Rounded { radius: 4.0 },
+                Gap {
+                    x: 0.0,
+                    y: 5.0,
+                },
+                DropdownFont {
+                    base_font: font_handle,
+                    base_font_size: 14.0,
+                },
+                DropdownTheme {
+                    fill_color: ThemeColor {
+                        r: 0.06,
+                        g: 0.06,
+                        b: 0.07,
+                        a: 1.0,
+                    },
+                    outline_color: ThemeColor {
+                        r: 0.35,
+                        g: 0.35,
+                        b: 0.38,
+                        a: 1.0,
+                    },
+                    focus_outline_color: ThemeColor {
+                        r: 0.36,
+                        g: 0.56,
+                        b: 0.92,
+                        a: 1.0,
+                    },
+                    text_color: ThemeColor {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    arrow_color: ThemeColor {
+                        r: 0.75,
+                        g: 0.75,
+                        b: 0.78,
+                        a: 1.0,
+                    },
+                    list_fill_color: ThemeColor {
+                        r: 0.12,
+                        g: 0.12,
+                        b: 0.14,
+                        a: 1.0,
+                    },
+                    list_outline_color: ThemeColor {
+                        r: 0.35,
+                        g: 0.35,
+                        b: 0.38,
+                        a: 1.0,
+                    },
+                    highlight_fill_color: ThemeColor {
+                        r: 0.24,
+                        g: 0.40,
+                        b: 0.72,
+                        a: 1.0,
+                    },
+                    highlight_text_color: ThemeColor {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    scrollbar_color: ThemeColor {
+                        r: 0.45,
+                        g: 0.45,
+                        b: 0.48,
+                        a: 1.0,
+                    },
+                },
+            )
+            .options(["Apple", "Banana", "Blueberry", "Cherry", "Date", "Elderberry", "Fig", "Grape", "Kiwi", "Lemon"])
+            .max_visible(5)
+            .on_change(move |index, option| {
+                log::info!("the dropdown was changed: {index} ({option})");
+            }),
+        ));
         let check_box_theme = || CheckBoxTheme {
             outline_color: ThemeColor { r: 0.8, g: 0.8, b: 0.8, a: 1.0 },
             enable_color: ThemeColor { r: 0.28, g: 0.44, b: 0.74, a: 1.0 },
@@ -407,10 +580,10 @@ impl Scene {
         };
         let mut radio = Radio::new(
             "RadioObject1".to_string(),
-            Axis::Row,
+            Axis::Column,
             Gap {
                 x: 0.0,
-                y: 5.0,
+                y: 10.0,
             },
             RadioFont {
                 base_font: font_handle,
@@ -422,9 +595,166 @@ impl Scene {
         });
         radio
             .add_radio_item("radio1".to_string(), 20.0, 20.0, Gap { x: 0.0, y: 0.0 }, 5.0, RadioShape::Circle, true, radio_theme())
-            .add_radio_item("radio2".to_string(), 20.0, 20.0, Gap { x: 12.0, y: 0.0 }, 5.0, RadioShape::Circle, false, radio_theme())
-            .add_radio_item("radio3".to_string(), 20.0, 20.0, Gap { x: 12.0, y: 0.0 }, 5.0, RadioShape::Circle, false, radio_theme());
+            .add_radio_item("radio2".to_string(), 20.0, 20.0, Gap { x: 0.0, y: 12.0 }, 5.0, RadioShape::Circle, false, radio_theme())
+            .add_radio_item("radio3".to_string(), 20.0, 20.0, Gap { x: 0.0, y: 12.0 }, 5.0, RadioShape::Circle, false, radio_theme());
         window_frame.add_window_item(Box::new(radio));
+
+        let input_text_theme = InputTextTheme {
+            fill_color: ThemeColor {
+                r: 0.06,
+                g: 0.06,
+                b: 0.07,
+                a: 1.0,
+            },
+            outline_color: ThemeColor {
+                r: 0.35,
+                g: 0.35,
+                b: 0.38,
+                a: 1.0,
+            },
+            focus_outline_color: ThemeColor {
+                r: 0.36,
+                g: 0.56,
+                b: 0.92,
+                a: 1.0,
+            },
+            text_color: ThemeColor {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            placeholder_color: ThemeColor {
+                r: 0.5,
+                g: 0.5,
+                b: 0.52,
+                a: 1.0,
+            },
+            caret_color: ThemeColor {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            selection_color: ThemeColor {
+                r: 0.24,
+                g: 0.40,
+                b: 0.72,
+                a: 1.0,
+            },
+        };
+        window_frame.add_window_item(Box::new(
+            Number::<i32>::new(
+                "Number".to_string(),
+                "number".to_string(),
+                200.0,
+                28.0,
+                8.0,
+                QuadType::Rounded {
+                    radius: 4.0
+                },
+                Gap {
+                    x: 0.0,
+                    y: 5.0
+                },
+                NumberFont {
+                    base_font: font_handle,
+                    base_font_size: 14.0
+                },
+                NumberTheme {
+                    input_text_theme,
+                    spin_fill_color: ThemeColor {
+                        r: 0.15,
+                        g: 0.15,
+                        b: 0.15,
+                        a: 1.0,
+                    },
+                    spin_hover_fill_color: ThemeColor {
+                        r: 0.25,
+                        g: 0.25,
+                        b: 0.25,
+                        a: 1.0,
+                    },
+                    spin_pressed_fill_color: ThemeColor {
+                        r: 0.35,
+                        g: 0.35,
+                        b: 0.35,
+                        a: 1.0,
+                    },
+                    arrow_color: ThemeColor {
+                        r: 0.9,
+                        g: 0.9,
+                        b: 0.9,
+                        a: 1.0,
+                    },
+                },
+            )
+            .on_input(move |value| {
+                log::info!("the number was typed: {value:?}");
+            })
+            .on_change(move |value| {
+                log::info!("the number was changed: {value:?}");
+            }),
+        ));
+        window_frame.add_window_item(Box::new(
+            Range::<i32>::new(
+                "Range".to_string(),
+                240.0,
+                20.0,
+                Gap {
+                    x: 0.0,
+                    y: 10.0,
+                },
+                RangeTheme {
+                    track_color: ThemeColor {
+                        r: 0.25,
+                        g: 0.25,
+                        b: 0.28,
+                        a: 1.0,
+                    },
+                    fill_color: ThemeColor {
+                        r: 0.28,
+                        g: 0.44,
+                        b: 0.74,
+                        a: 1.0,
+                    },
+                    thumb_color: ThemeColor {
+                        r: 0.85,
+                        g: 0.85,
+                        b: 0.88,
+                        a: 1.0,
+                    },
+                    thumb_hover_color: ThemeColor {
+                        r: 0.95,
+                        g: 0.95,
+                        b: 0.97,
+                        a: 1.0,
+                    },
+                    thumb_pressed_color: ThemeColor {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    focus_ring_color: ThemeColor {
+                        r: 0.36,
+                        g: 0.56,
+                        b: 0.92,
+                        a: 1.0,
+                    },
+                },
+            )
+            .min(0)
+            .max(100)
+            .step(1)
+            .value(50)
+            .on_input(move |value| {
+                log::info!("the range was moved: {value}");
+            })
+            .on_change(move |value| {
+                log::info!("the range was changed: {value}");
+            }),
+        ));
         window_frame.add_window_item(
             Box::new(
                 InputText::new(
@@ -442,50 +772,7 @@ impl Scene {
                         base_font: font_handle,
                         base_font_size: 14.0,
                     },
-                    InputTextTheme {
-                        fill_color: ThemeColor {
-                            r: 0.06,
-                            g: 0.06,
-                            b: 0.07,
-                            a: 1.0,
-                        },
-                        outline_color: ThemeColor {
-                            r: 0.35,
-                            g: 0.35,
-                            b: 0.38,
-                            a: 1.0,
-                        },
-                        focus_outline_color: ThemeColor {
-                            r: 0.36,
-                            g: 0.56,
-                            b: 0.92,
-                            a: 1.0,
-                        },
-                        text_color: ThemeColor {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 1.0,
-                        },
-                        placeholder_color: ThemeColor {
-                            r: 0.5,
-                            g: 0.5,
-                            b: 0.52,
-                            a: 1.0,
-                        },
-                        caret_color: ThemeColor {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 1.0,
-                        },
-                        selection_color: ThemeColor {
-                            r: 0.24,
-                            g: 0.40,
-                            b: 0.72,
-                            a: 1.0,
-                        },
-                    }
+                    input_text_theme,
                 )
                 .on_submit(|text| log::info!("submitted: {text}"))
             )
@@ -507,50 +794,7 @@ impl Scene {
                         base_font: font_handle,
                         base_font_size: 14.0,
                     },
-                    InputTextTheme {
-                        fill_color: ThemeColor {
-                            r: 0.06,
-                            g: 0.06,
-                            b: 0.07,
-                            a: 1.0,
-                        },
-                        outline_color: ThemeColor {
-                            r: 0.35,
-                            g: 0.35,
-                            b: 0.38,
-                            a: 1.0,
-                        },
-                        focus_outline_color: ThemeColor {
-                            r: 0.36,
-                            g: 0.56,
-                            b: 0.92,
-                            a: 1.0,
-                        },
-                        text_color: ThemeColor {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 1.0,
-                        },
-                        placeholder_color: ThemeColor {
-                            r: 0.5,
-                            g: 0.5,
-                            b: 0.52,
-                            a: 1.0,
-                        },
-                        caret_color: ThemeColor {
-                            r: 1.0,
-                            g: 1.0,
-                            b: 1.0,
-                            a: 1.0,
-                        },
-                        selection_color: ThemeColor {
-                            r: 0.24,
-                            g: 0.40,
-                            b: 0.72,
-                            a: 1.0,
-                        },
-                    }
+                    input_text_theme,
                 )
                 .password()
                 .on_submit(|text| log::info!("password submitted ({} characters)", text.chars().count()))
